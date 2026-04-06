@@ -12,6 +12,7 @@ Xây dựng ứng dụng **desktop Windows** (64-bit, Windows 10 và 11) để:
 - **MVP:** Ghi video đóng gói từ **một** camera/webcam HD; **cùng thiết bị** phục vụ **quét mã** (một luồng vật lý — cách chia luồng decode vs ghi **chốt trong plan** nếu driver không cho mở kép `VideoCapture` + FFmpeg).
 - **Giai đoạn 2:** Hỗ trợ **hai** camera ghi, xuất **một file** ghép **PIP cố định** (khung lớn + khung nhỏ); có thể tách **camera quét** riêng nếu cần.
 - **Quét mã** (hỗ trợ **cả mã vạch 1D và QR**) để điều khiển **bắt đầu / dừng / chuyển đơn** ghi hình.
+- **Cảnh báo trùng đơn:** khi chuẩn bị **mở phiên ghi mới** cho một mã đơn mà **trong thư mục ngày hiện tại** đã có video cùng đơn, app **thông báo rõ** (phi chặn) nhưng **vẫn cho phép quay** bình thường (file mới, timestamp mới — không ghi đè).
 - **MVP:** Mỗi phiên ghi là **một file MP4** từ **một nguồn** (full frame HD), **không** PIP.
 - **Không ghi âm** vào file.
 - Lưu file theo **đường dẫn gốc do người dùng cấu hình**, tự tạo **một thư mục theo ngày**.
@@ -26,6 +27,7 @@ Xây dựng ứng dụng **desktop Windows** (64-bit, Windows 10 và 11) để:
 - Giao diện **chỉ chế độ sáng**, phong cách **Material / Google-inspired** (PySide6 + Qt Widgets + QSS, style nền Fusion).
 - Không yêu cầu đăng nhập, không đồng bộ cloud trong app (có thể lưu vào thư mục mà Google Drive / OneDrive client đồng bộ ngoài app).
 - **Tắt máy hẹn giờ:** mặc định **18:00** giờ địa phương Windows; có **công tắc bật/tắt** và ô chọn **giờ:phút**; đếm ngược **60s** trước khi tắt; **hủy bằng quét mã bất kỳ**; sau hủy **hoãn +1 giờ** cho lần tắt kế tiếp.
+- **Trùng đơn:** có **cơ chế báo** khi đơn đã có video trong ngày; **không chặn** ghi thêm.
 
 ## 3. Nghiệp vụ quét và trạng thái ghi
 
@@ -48,6 +50,8 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 | Đang ghi `A` | Quét lại `A` | Dừng ghi; đóng file hiện tại. |
 | Đang ghi `A` | Quét `B` (`B` ≠ `A`) | Dừng file của `A`; **ngay sau đó** bắt đầu file mới cho `B`. |
 
+*(Trước mỗi lần **bắt đầu file mới** cho một mã đơn — các ô trên có kết quả “Bắt đầu ghi” / “bắt đầu file mới” — áp dụng kiểm tra **trùng đơn** §3.5; không áp dụng cho hành động **chỉ dừng** ghi.)*
+
 ### 3.3 Chống nhiễu
 
 - **Debounce** khi cùng một mã lặp trong cửa sổ thời gian ngắn (ví dụ vài trăm ms) để tránh double-fire từ một lần quét vật lý.
@@ -58,6 +62,16 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 - Nếu UI đang ở chế độ **hẹn tắt máy — đếm ngược** (mục 8): mọi lần **decode thành công** (bất kỳ nội dung mã nào, 1D hoặc QR) **chỉ** dùng để **hủy lệnh tắt máy** — **không** áp dụng bảng trạng thái §3.2 (không bắt đầu/dừng/chuyển đơn từ lần quét đó).
 - Sau khi hủy thành công, quét trở lại hoạt động bình thường theo §3.2 (lưu ý: nếu bước 8 đã **dừng ghi** trước đếm ngược, người dùng cần quét đơn để ghi tiếp như bình thường).
 
+### 3.5 Cảnh báo trùng đơn (không chặn ghi)
+
+- **Định nghĩa trùng:** trong thư mục **ngày hiện tại** `{Root}/yyyy-MM-dd/` đã có **ít nhất một** file `.mp4` có dạng **`{maDon}_*.mp4`**, với `{maDon}` là phần mã đơn đã **sanitize** theo **cùng quy tắc** đặt tên §4.2. **Quy ước:** khi sanitize, **loại bỏ hoặc thay thế ký tự `_`** trong mã đơn (ví dụ thành `-`) để **một** dấu `_` duy nhất trong tên file luôn là ranh giới giữa mã và timestamp — tránh nhầm khi so khớp tiền tố.
+- **Thời điểm kiểm tra:** ngay **trước** khi thực hiện bước **mở phiên ghi mới** cho mã đơn đó (sau khi đã quyết định theo §3.2 rằng sẽ có file mới). **Không** kiểm tra khi chỉ **dừng** ghi (ví dụ quét lại `A` khi đang ghi `A` để đóng file).
+- **Hành vi bắt buộc:**
+  - Nếu **trùng** → hiển thị **thông báo phi chặn** (không dùng hộp thoại modal bắt buộc bấm OK mới ghi — tránh làm chậm quầy): ví dụ **banner** trên cửa sổ chính, **thanh trạng thái** (`QStatusBar`) với style nổi bật ngắn, hoặc **toast** tự ẩn sau vài giây — **chốt widget trong plan**.
+  - **Luôn tiếp tục** luồng ghi: tạo **file mới** `{maDon}_{yyyyMMdd-HHmmss}.mp4` như bình thường; **không ghi đè**, không hủy lệnh bắt đầu ghi.
+- **Nội dung gợi ý:** *"Đơn [mã] đã có ít nhất một video hôm nay — vẫn ghi thêm."* (có thể hiển thị số file đã có — tùy chọn trong plan).
+- **Hiệu năng:** kiểm tra bằng **liệt kê / glob** trong thư mục ngày (thường ít file); cache kết quả trong phiên nếu cần — **chốt trong plan** nếu thư mục lớn bất thường.
+
 ## 4. Lưu trữ và dọn dẹp 16 ngày
 
 ### 4.1 Đường dẫn
@@ -67,7 +81,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 ### 4.2 Cấu trúc thư mục
 
 - Mỗi ngày một thư mục con: `{Root}/yyyy-MM-dd/`.
-- Tên file video: `{maDon}_{yyyyMMdd-HHmmss}.mp4` sau khi **sanitize** ký tự không hợp lệ trên Windows (`<>:"/\|?*` và ký tự điều khiển).
+- Tên file video: `{maDon}_{yyyyMMdd-HHmmss}.mp4` sau khi **sanitize** ký tự không hợp lệ trên Windows (`<>:"/\|?*` và ký tự điều khiển). **Bổ sung:** trong phần `{maDon}`, **không giữ ký tự `_`** (thay bằng `-` hoặc bỏ) để trùng đơn §3.5 so khớp tiền tố `"{maDon}_"` không bị sai lệch.
 
 ### 4.3 Retention
 
@@ -136,6 +150,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 - **Quét trùng khi đang debounce:** bỏ qua log âm thầm hoặc một dòng log debug tùy cấu hình.
 - **Tắt máy bị từ chối (policy / không đủ quyền):** thông báo; không giả định máy đã tắt.
 - **Đếm ngược tắt máy:** quét hủy **không** làm hỏng file đã dừng ở bước 1; xác nhận **`next_shutdown_at`** cập nhật đúng **+1 giờ**. **Camera/scanner lỗi trong 60s:** không thể quét hủy — hết giờ vẫn tắt theo bước 4; nếu cần **nút dự phòng** cho sự cố phần cứng, **chốt trong plan** (ngoài luồng “chỉ quét” lý tưởng).
+- **Trùng đơn:** thư mục ngày đã có `DON123_*.mp4` — quét `DON123` để **bắt đầu ghi lại** → có thông báo trùng, vẫn xuất hiện **file thứ hai** timestamp khác; quét `DON123` để **dừng** khi đang ghi → **không** bắt buộc báo trùng (hành động dừng).
 
 ## 11. Kiểm thử gợi ý
 
@@ -146,6 +161,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 - Ngày sang thư mục mới sau nửa đêm (hoặc theo quy ước timezone trong plan).
 - Retention: thư mục giả lập >16 ngày bị xóa đúng; thư mục không đúng format không bị đụng.
 - **Tắt máy hẹn giờ:** mock `next_shutdown_at` hoặc chỉnh giờ thử; UI **đếm ngược đúng 60s**; **quét bất kỳ mã** trong lúc đếm ngược → hủy, **không** gọi §3.2 cho lần quét đó; kiểm tra **`next_shutdown_at = now + 1h`**; sau hủy, quét đơn hoạt động lại bình thường; **không quét** → hết 60s → tắt máy (hoặc mô phỏng policy chặn).
+- **Trùng đơn:** tạo sẵn file giả trong thư mục ngày → quét cùng mã để mở ghi mới → có **thông báo** và **hai file** (hoặc nhiều hơn) cùng tiền tố đơn; xác nhận **không** modal chặn luồng làm việc.
 
 ## 12. Ngoài phạm vi MVP
 
