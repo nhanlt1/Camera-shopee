@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import replace
+from functools import partial
 
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -26,13 +29,14 @@ from PySide6.QtWidgets import (
 )
 
 from packrecorder.config import AppConfig, MultiCameraMode, StationConfig, default_stations
+from packrecorder.ui.camera_preview import CameraPreviewLabel
 
 
 class SettingsDialog(QDialog):
     def __init__(self, cfg: AppConfig, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Cài đặt")
-        self.resize(520, 560)
+        self.resize(640, 780)
         self._cfg = cfg
 
         self._root = QLineEdit(cfg.video_root)
@@ -68,10 +72,46 @@ class SettingsDialog(QDialog):
         self._build_page_stations(cfg)
         self._build_page_pip(cfg)
 
-        self._mode_single.toggled.connect(self._sync_stack)
-        self._mode_stations.toggled.connect(self._sync_stack)
-        self._mode_pip.toggled.connect(self._sync_stack)
+        self._mode_single.toggled.connect(self._on_mode_changed)
+        self._mode_stations.toggled.connect(self._on_mode_changed)
+        self._mode_pip.toggled.connect(self._on_mode_changed)
         self._sync_stack()
+
+        preview_box = QGroupBox("Xem trực tiếp (kiểm tra đúng camera)")
+        preview_outer = QVBoxLayout(preview_box)
+        self._preview_hint_single = QLabel(
+            "Hình dưới đây là camera theo ô «Camera (index)» ở trên."
+        )
+        self._preview_hint_single.setWordWrap(True)
+        station_prev_row = QHBoxLayout()
+        station_prev_row.addWidget(QLabel("Xem camera của:"))
+        self._stations_preview_combo = QComboBox()
+        self._stations_preview_combo.setMinimumWidth(280)
+        self._stations_preview_combo.currentIndexChanged.connect(
+            self._apply_preview_from_current_ui
+        )
+        station_prev_row.addWidget(self._stations_preview_combo, 1)
+        self._preview_station_widget = QWidget()
+        self._preview_station_widget.setLayout(station_prev_row)
+
+        pip_prev_row = QHBoxLayout()
+        pip_prev_row.addWidget(QLabel("Xem trước:"))
+        self._pip_preview_combo = QComboBox()
+        self._pip_preview_combo.addItems(
+            ["Khung chính", "Khung phụ", "Đọc mã vạch"]
+        )
+        self._pip_preview_combo.currentIndexChanged.connect(
+            self._apply_preview_from_current_ui
+        )
+        pip_prev_row.addWidget(self._pip_preview_combo, 1)
+        self._preview_pip_widget = QWidget()
+        self._preview_pip_widget.setLayout(pip_prev_row)
+
+        self._preview = CameraPreviewLabel(self)
+        preview_outer.addWidget(self._preview_hint_single)
+        preview_outer.addWidget(self._preview_station_widget)
+        preview_outer.addWidget(self._preview_pip_widget)
+        preview_outer.addWidget(self._preview)
 
         self._ffmpeg = QLineEdit(cfg.ffmpeg_path)
         fb = QPushButton("Chọn ffmpeg…")
@@ -120,8 +160,25 @@ class SettingsDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.addWidget(mode_box)
         outer.addWidget(self._stack)
+        outer.addWidget(preview_box)
         outer.addLayout(common)
         outer.addWidget(buttons)
+
+        self._sync_preview_chrome()
+        self._populate_stations_preview_combo()
+
+    def dispose_preview(self) -> None:
+        self._preview.stop()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        QTimer.singleShot(0, self._apply_preview_from_current_ui)
+
+    def _on_mode_changed(self) -> None:
+        self._sync_stack()
+        self._sync_preview_chrome()
+        self._populate_stations_preview_combo()
+        self._apply_preview_from_current_ui()
 
     def _sync_stack(self) -> None:
         if self._mode_single.isChecked():
@@ -131,12 +188,64 @@ class SettingsDialog(QDialog):
         else:
             self._stack.setCurrentIndex(2)
 
+    def _sync_preview_chrome(self) -> None:
+        self._preview_hint_single.setVisible(self._mode_single.isChecked())
+        self._preview_station_widget.setVisible(self._mode_stations.isChecked())
+        self._preview_pip_widget.setVisible(self._mode_pip.isChecked())
+
+    def _preview_index_stations(self) -> int:
+        data = self._stations_preview_combo.currentData()
+        if not data or not self._station_rows:
+            return 0
+        row_i, kind = data
+        if row_i < 0 or row_i >= len(self._station_rows):
+            return 0
+        _pk, rs, ds, _sid, _rm = self._station_rows[row_i]
+        return rs.value() if kind == "rec" else ds.value()
+
+    def _preview_index_pip(self) -> int:
+        k = self._pip_preview_combo.currentIndex()
+        return (
+            self._pip_main.value(),
+            self._pip_sub.value(),
+            self._pip_decode.value(),
+        )[k]
+
+    def _apply_preview_from_current_ui(self) -> None:
+        if self._mode_single.isChecked():
+            self._preview.set_camera_index(self._single_camera.value())
+        elif self._mode_stations.isChecked():
+            self._preview.set_camera_index(self._preview_index_stations())
+        elif self._mode_pip.isChecked():
+            self._preview.set_camera_index(self._preview_index_pip())
+        else:
+            self._preview.stop()
+
+    def _populate_stations_preview_combo(self) -> None:
+        self._stations_preview_combo.blockSignals(True)
+        self._stations_preview_combo.clear()
+        for i, row in enumerate(self._station_rows):
+            pk, rs, ds, _, _ = row
+            lab = pk.text().strip() or f"Quầy {i+1}"
+            self._stations_preview_combo.addItem(
+                f"«{lab}» ghi → camera {rs.value()}",
+                (i, "rec"),
+            )
+            self._stations_preview_combo.addItem(
+                f"«{lab}» quét → camera {ds.value()}",
+                (i, "dec"),
+            )
+        self._stations_preview_combo.blockSignals(False)
+        if self._stations_preview_combo.count() > 0:
+            self._stations_preview_combo.setCurrentIndex(0)
+
     def _build_page_single(self, cfg: AppConfig) -> None:
         w = QWidget()
         lay = QFormLayout(w)
         self._single_camera = QSpinBox()
         self._single_camera.setRange(0, 9)
         self._single_camera.setValue(cfg.camera_index)
+        self._single_camera.valueChanged.connect(self._apply_preview_from_current_ui)
         self._single_packer = QComboBox()
         self._single_packer.setEditable(True)
         self._single_packer.addItems(["Máy 1", "Máy 2"])
@@ -151,7 +260,7 @@ class SettingsDialog(QDialog):
         outer.addWidget(
             QLabel(
                 "Mỗi dòng: nhãn gói, camera ghi, camera dùng để quét mã.\n"
-                "Dùng menu «Gán máy quét» trên cửa sổ chính để quét mã gán nhanh."
+                "Dùng khung «Xem trực tiếp» bên dưới để đối chiếu đúng thiết bị."
             )
         )
         self._stations_container = QWidget()
@@ -169,7 +278,9 @@ class SettingsDialog(QDialog):
         outer.addWidget(add_btn)
         stations = list(cfg.stations) if cfg.stations else default_stations()
         for s in stations:
-            self._append_station_row(s.packer_label, s.record_camera_index, s.decode_camera_index, s.station_id)
+            self._append_station_row(
+                s.packer_label, s.record_camera_index, s.decode_camera_index, s.station_id
+            )
         if not self._station_rows:
             self._add_station_row()
         self._stack.addWidget(w)
@@ -200,19 +311,39 @@ class SettingsDialog(QDialog):
         grid.addWidget(ds, 0, 5)
         grid.addWidget(rm, 0, 6)
 
+        rs.valueChanged.connect(self._apply_preview_from_current_ui)
+        ds.valueChanged.connect(self._apply_preview_from_current_ui)
+        rs.valueChanged.connect(
+            partial(self._repopulate_stations_preview_combo_keep_index)
+        )
+        ds.valueChanged.connect(
+            partial(self._repopulate_stations_preview_combo_keep_index)
+        )
+
         def do_remove() -> None:
             if len(self._station_rows) <= 1:
                 return
             self._station_rows[:] = [x for x in self._station_rows if x[4] is not rm]
             row_w.deleteLater()
+            self._populate_stations_preview_combo()
+            self._apply_preview_from_current_ui()
 
         rm.clicked.connect(do_remove)
         self._stations_layout.addWidget(row_w)
         self._station_rows.append((pk, rs, ds, sid, rm))
 
+    def _repopulate_stations_preview_combo_keep_index(self, *_args: object) -> None:
+        idx = self._stations_preview_combo.currentIndex()
+        self._populate_stations_preview_combo()
+        if 0 <= idx < self._stations_preview_combo.count():
+            self._stations_preview_combo.setCurrentIndex(idx)
+        self._apply_preview_from_current_ui()
+
     def _add_station_row(self) -> None:
         n = len(self._station_rows) + 1
         self._append_station_row(f"Máy {n}", min(9, n - 1), min(9, n - 1), None)
+        self._populate_stations_preview_combo()
+        self._apply_preview_from_current_ui()
 
     def _build_page_pip(self, cfg: AppConfig) -> None:
         w = QWidget()
@@ -242,6 +373,9 @@ class SettingsDialog(QDialog):
         lay.addRow("Tên / nhãn gói", self._pip_packer)
         lay.addRow("Độ rộng tối đa khung phụ (px)", self._pip_ow)
         lay.addRow("Lề góc (px)", self._pip_mg)
+        self._pip_main.valueChanged.connect(self._apply_preview_from_current_ui)
+        self._pip_sub.valueChanged.connect(self._apply_preview_from_current_ui)
+        self._pip_decode.valueChanged.connect(self._apply_preview_from_current_ui)
         self._stack.addWidget(w)
 
     def _browse_root(self) -> None:

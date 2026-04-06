@@ -561,17 +561,37 @@ class MainWindow(QMainWindow):
                 "padding:6px 10px;border-radius:6px;background:#e8eaf6;color:#1a237e;"
             )
 
+    def _pause_scan_workers(self) -> None:
+        self._pip_timer.stop()
+        for w in list(self._workers.values()):
+            w.stop_worker()
+        for w in list(self._workers.values()):
+            w.wait(5000)
+        self._workers.clear()
+
     def _open_settings(self) -> None:
+        if any(r is not None for r in self._recorders.values()):
+            QMessageBox.warning(
+                self,
+                "Đang ghi hình",
+                "Vui lòng dừng ghi (quét lại cùng mã đơn hoặc đóng phiên) trước khi mở Cài đặt "
+                "để xem trước camera.",
+            )
+            return
+        self._pause_scan_workers()
         dlg = SettingsDialog(self._config, self)
-        if dlg.exec():
-            self._config = dlg.result_config()
-            save_config(self._config_path, self._config)
-            self._feedback.update_config(self._config)
-            self._refresh_next_shutdown()
-            self._rebuild_order_machines()
-            self._rebuild_bind_menu()
+        try:
+            if dlg.exec():
+                self._config = dlg.result_config()
+                save_config(self._config_path, self._config)
+                self._feedback.update_config(self._config)
+                self._refresh_next_shutdown()
+                self._rebuild_order_machines()
+                self._rebuild_bind_menu()
+                self._update_packer_message()
+        finally:
+            dlg.dispose_preview()
             self._restart_scan_workers()
-            self._update_packer_message()
 
     def _cleanup_workers(self) -> None:
         self._pip_timer.stop()
