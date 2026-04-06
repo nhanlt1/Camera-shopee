@@ -3,13 +3,16 @@
 **Ngày:** 2026-04-06  
 **Trạng thái:** Đã duyệt (brainstorming) — sẵn sàng cho kế hoạch triển khai.
 
+**Chiến lược phát hành:** **MVP = một camera** (triển khai và kiểm thử trước). **Giai đoạn 2** bổ sung camera thứ hai và **PIP** trong một file.
+
 ## 1. Mục tiêu
 
 Xây dựng ứng dụng **desktop Windows** (64-bit, Windows 10 và 11) để:
 
-- Ghi video đóng gói hàng từ **một hoặc hai** camera/webcam chất lượng HD.
+- **MVP:** Ghi video đóng gói từ **một** camera/webcam HD; **cùng thiết bị** phục vụ **quét mã** (một luồng vật lý — cách chia luồng decode vs ghi **chốt trong plan** nếu driver không cho mở kép `VideoCapture` + FFmpeg).
+- **Giai đoạn 2:** Hỗ trợ **hai** camera ghi, xuất **một file** ghép **PIP cố định** (khung lớn + khung nhỏ); có thể tách **camera quét** riêng nếu cần.
 - **Quét mã** (hỗ trợ **cả mã vạch 1D và QR**) để điều khiển **bắt đầu / dừng / chuyển đơn** ghi hình.
-- Xuất **một file video duy nhất** mỗi phiên ghi, ghép hai nguồn theo bố cục **PIP cố định** (khung lớn + khung nhỏ góc màn hình).
+- **MVP:** Mỗi phiên ghi là **một file MP4** từ **một nguồn** (full frame HD), **không** PIP.
 - **Không ghi âm** vào file.
 - Lưu file theo **đường dẫn gốc do người dùng cấu hình**, tự tạo **một thư mục theo ngày**.
 - **Tự động xóa** dữ liệu video cũ hơn **16 ngày** (an toàn, chỉ trong cấu trúc thư mục do app quản lý).
@@ -18,6 +21,7 @@ Xây dựng ứng dụng **desktop Windows** (64-bit, Windows 10 và 11) để:
 
 ## 2. Phạm vi phiên bản đầu (MVP)
 
+- **Ưu tiên triển khai:** **đúng một camera** — cài đặt chỉ cần chọn **một** thiết bị; không bắt buộc cấu hình camera phụ hay PIP.
 - Một máy, một user vận hành tại quầy đóng gói.
 - Giao diện **chỉ chế độ sáng**, phong cách **Material / Google-inspired** (PySide6 + Qt Widgets + QSS, style nền Fusion).
 - Không yêu cầu đăng nhập, không đồng bộ cloud trong app (có thể lưu vào thư mục mà Google Drive / OneDrive client đồng bộ ngoài app).
@@ -27,10 +31,12 @@ Xây dựng ứng dụng **desktop Windows** (64-bit, Windows 10 và 11) để:
 
 ### 3.1 Gán thiết bị (cấu hình)
 
-- Người dùng chọn trong cài đặt:
+- **MVP — một camera:**
+  - Một mục chọn **Camera** (nguồn duy nhất cho cả **ghi** và **quét** trên cùng thiết bị).
+- **Giai đoạn 2** (sau khi MVP ổn định):
   - **Camera ghi — khung chính** (PIP lớn).
-  - **Camera ghi — khung phụ** (PIP nhỏ). Có thể tắt nếu chỉ dùng một camera ghi (khi đó chỉ một nguồn vào FFmpeg hoặc layout đơn giản hóa — xem mục 6).
-  - **Camera quét** (decode mã). Có thể trùng với một trong hai camera ghi hoặc là thiết bị riêng.
+  - **Camera ghi — khung phụ** (PIP nhỏ).
+  - **Camera quét** (decode mã): có thể trùng một trong hai camera ghi hoặc riêng.
 
 ### 3.2 Máy trạng thái theo mã đơn
 
@@ -72,19 +78,19 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 | UI | **PySide6**, Qt Widgets, style **Fusion**, **QSS** (Material/Google light) |
 | Camera / frame | **OpenCV** (`VideoCapture`), backend DirectShow trên Windows khi phù hợp |
 | Decode 1D + QR | Thư viện decode ổn định trên Windows (ví dụ **pyzbar** + runtime **ZBar**, hoặc phương án tương đương) — chốt trong plan nếu có ràng buộc license/binary |
-| Mã hóa / PIP | **FFmpeg** CLI (build static đi kèm bản phân phối), hai đầu vào `dshow`, `filter_complex` **overlay**; **không** map audio (`-an`) |
-| Cấu hình | JSON hoặc `QSettings` (đường dẫn root, chỉ số/tên thiết bị camera, vị trí/kích thước PIP, bitrate/preset, **bật tắt máy hẹn giờ**, **giờ kích hoạt** dạng `HH:mm` theo giờ máy) |
+| Mã hóa / video | **FFmpeg** CLI (build static đi kèm bản phân phối): **MVP** — **một** đầu vào `dshow`; **giai đoạn 2** — hai đầu vào + `filter_complex` **overlay** (PIP); **không** map audio (`-an`) |
+| Cấu hình | JSON hoặc `QSettings` (đường dẫn root, **MVP:** một camera; **v2:** camera phụ + PIP, vị trí/kích thước PIP, bitrate/preset, **bật tắt máy hẹn giờ**, **giờ kích hoạt** `HH:mm`) |
 | Đóng gói | PyInstaller (hoặc tương đương) + ship `ffmpeg.exe` + DLL phụ thuộc decode |
 
-## 6. Video: PIP và một nguồn
+## 6. Video: MVP một nguồn và giai đoạn 2 (PIP)
 
-- **Hai camera ghi:** một luồng làm nền full frame, luồng kia scale nhỏ, **overlay** cố định (ví dụ góc phải dưới, offset pixel có thể là hằng số hoặc cấu hình sau MVP).
-- **Một camera ghi:** MVP có thể **chỉ ghi một nguồn** full frame (không PIP) hoặc nhân đôi nguồn — **chốt trong plan** theo độ phức tạp FFmpeg; ưu tiên hành vi rõ ràng: nếu user chỉ chọn một camera ghi thì output một nguồn HD.
+- **MVP (ưu tiên):** **một** luồng video DirectShow → FFmpeg → file MP4 **full frame** (ví dụ 1920×1080 hoặc native của thiết bị — **chốt preset trong plan**). **Không** ghép PIP.
+- **Giai đoạn 2:** **Hai camera ghi:** một full frame, một scale nhỏ, **overlay** cố định (ví dụ góc phải dưới); cùng một file đầu ra như spec gốc.
 
 ## 7. Kiến trúc luồng xử lý
 
 - **Luồng UI (main):** nhận tín hiệu từ worker, cập nhật trạng thái, không block khi quét/ghi.
-- **Worker quét (QThread):** lấy frame từ camera quét với tần suất hợp lý (ví dụ 10–15 fps); decode; emit signal sang main với chuỗi đơn đã chuẩn hóa.
+- **Worker quét (QThread):** lấy frame để decode (nguồn frame **chốt trong plan** cho MVP một camera: có thể từ `VideoCapture` cùng thiết bị, hoặc tách luồng nếu driver không cho mở song song với FFmpeg — tránh double-open khi không cần). Tần suất hợp lý (ví dụ 10–15 fps); emit signal sang main với chuỗi đơn đã chuẩn hóa.
 - **Điều khiển ghi:** mỗi phiên ghi tương ứng **một tiến trình FFmpeg**; chuyển đơn = **dừng hợp lệ** process hiện tại rồi spawn process mới với đường dẫn output mới.
 - **Preview (tuỳ chọn MVP):** hiển thị một camera hoặc lược đồ đơn giản; giảm FPS khi đang ghi để tiết kiệm CPU.
 - **Đồng hồ tắt máy:** `QTimer` kiểm tra định kỳ (ví dụ mỗi 30–60 giây) so sánh **giờ hệ thống địa phương** với giờ cấu hình; khi đạt ngưỡng và tính năng **bật**, kích hoạt chuỗi tắt máy (mục 8).
@@ -126,7 +132,8 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 
 ## 11. Kiểm thử gợi ý
 
-- Hai webcam + một UNC + một thư mục đồng bộ (mô phỏng).
+- **MVP:** **một** webcam + đường dẫn local và (tuỳ) UNC / thư mục đồng bộ — xác nhận ghi ổn trước khi mở rộng.
+- **Giai đoạn 2:** hai webcam, PIP, chuyển đơn dưới tải hai nguồn.
 - Chuỗi: A → B → C (chuyển đơn liên tục); A → A (toggle dừng).
 - Kill Python từ Task Manager: kiểm tra không còn `ffmpeg.exe` treo (Job Object).
 - Ngày sang thư mục mới sau nửa đêm (hoặc theo quy ước timezone trong plan).
@@ -135,6 +142,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 
 ## 12. Ngoài phạm vi MVP
 
+- **Hai camera ghi + PIP trong một file** và cấu hình **camera quét tách** — thuộc **giai đoạn 2**, sau khi MVP **một camera** đã chạy ổn.
 - Chế độ tối (dark theme).
 - Đăng nhập đa user, phân quyền.
 - Upload trực tiếp lên cloud từ app.
@@ -143,4 +151,4 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 
 ## 13. Bước tiếp theo
 
-Sau khi spec này được xác nhận lần cuối, tạo **implementation plan** chi tiết (tasks, thứ tự, rủi ro FFmpeg/OpenCV trên Windows, và chiến lược đóng gói).
+Sau khi spec này được xác nhận lần cuối, tạo **implementation plan** chi tiết: **đường ưu tiên MVP một camera** (thứ tự task, xử lý xung đột mở camera trên Windows nếu có), sau đó mục **giai đoạn 2** (PIP hai nguồn), rủi ro FFmpeg/OpenCV, và chiến lược đóng gói.
