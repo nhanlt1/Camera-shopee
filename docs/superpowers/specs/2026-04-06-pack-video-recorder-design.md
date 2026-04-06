@@ -14,7 +14,8 @@ Xây dựng ứng dụng **desktop Windows** (64-bit, Windows 10 và 11) để:
 - **Quét mã** (hỗ trợ **cả mã vạch 1D và QR**) để điều khiển **bắt đầu / dừng / chuyển đơn** ghi hình.
 - **Cảnh báo trùng đơn:** khi chuẩn bị **mở phiên ghi mới** cho một mã đơn mà **trong thư mục ngày hiện tại** đã có video cùng đơn, app **thông báo rõ** (phi chặn) nhưng **vẫn cho phép quay** bình thường (file mới, timestamp mới — không ghi đè).
 - **MVP:** Mỗi phiên ghi là **một file MP4** từ **một nguồn** (full frame HD), **không** PIP.
-- **Không ghi âm** vào file.
+- **Không ghi âm** vào file video.
+- **Âm thanh quầy (tùy cấu hình):** có thể bật **phát một âm thanh do app điều khiển** ngay khi **bắt đầu ghi thành công** (bổ sung cho tiếng “bíp” của **súng quét mã vạch** nếu có — tiếng súng do phần cứng/firmware; app phát thêm file âm thanh tùy chọn để xác nhận **máy tính đã vào trạng thái quay**). **Không** đưa âm này vào MP4.
 - Lưu file theo **đường dẫn gốc do người dùng cấu hình**, tự tạo **một thư mục theo ngày**.
 - **Tự động xóa** dữ liệu video cũ hơn **16 ngày** (an toàn, chỉ trong cấu trúc thư mục do app quản lý).
 - **Tự động tắt máy** theo giờ cấu hình (mặc định **18:00**), có **bật/tắt** và **đổi giờ**; trước khi tắt: **dừng ghi** an toàn; hiển thị **đếm ngược 60 giây**; chỉ khi **hết giờ** mới giải phóng camera và gửi lệnh tắt Windows. **Hủy tắt máy:** người dùng **phải quét bất kỳ mã** (1D hoặc QR) hợp lệ trong lúc đếm ngược; khi hủy thành công, lần tự tắt **kế tiếp** được **hoãn thêm 1 giờ** kể từ lúc hủy.
@@ -28,6 +29,7 @@ Xây dựng ứng dụng **desktop Windows** (64-bit, Windows 10 và 11) để:
 - Không yêu cầu đăng nhập, không đồng bộ cloud trong app (có thể lưu vào thư mục mà Google Drive / OneDrive client đồng bộ ngoài app).
 - **Tắt máy hẹn giờ:** mặc định **18:00** giờ địa phương Windows; có **công tắc bật/tắt** và ô chọn **giờ:phút**; đếm ngược **60s** trước khi tắt; **hủy bằng quét mã bất kỳ**; sau hủy **hoãn +1 giờ** cho lần tắt kế tiếp.
 - **Trùng đơn:** có **cơ chế báo** khi đơn đã có video trong ngày; **không chặn** ghi thêm.
+- **Âm báo bắt đầu ghi:** có **bật/tắt** và (tuỳ chọn) **chọn file âm thanh** hoặc âm mặc định kèm app — xem §3.6.
 
 ## 3. Nghiệp vụ quét và trạng thái ghi
 
@@ -55,7 +57,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 ### 3.3 Chống nhiễu
 
 - **Debounce** khi cùng một mã lặp trong cửa sổ thời gian ngắn (ví dụ vài trăm ms) để tránh double-fire từ một lần quét vật lý.
-- Phản hồi UI: trạng thái rõ (đang ghi / chờ), có thể **beep hệ thống** hoặc đổi màu chip trạng thái (không ghi âm vào video).
+- Phản hồi UI: trạng thái rõ (đang ghi / chờ), đổi màu chip trạng thái; **âm “đã bắt đầu quay”** tùy cấu hình — §3.6 (không ghi âm vào video).
 
 ### 3.4 Ưu tiên khi đang đếm ngược tắt máy (60s)
 
@@ -71,6 +73,16 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
   - **Luôn tiếp tục** luồng ghi: tạo **file mới** `{maDon}_{yyyyMMdd-HHmmss}.mp4` như bình thường; **không ghi đè**, không hủy lệnh bắt đầu ghi.
 - **Nội dung gợi ý:** *"Đơn [mã] đã có ít nhất một video hôm nay — vẫn ghi thêm."* (có thể hiển thị số file đã có — tùy chọn trong plan).
 - **Hiệu năng:** kiểm tra bằng **liệt kê / glob** trong thư mục ngày (thường ít file); cache kết quả trong phiên nếu cần — **chốt trong plan** nếu thư mục lớn bất thường.
+
+### 3.6 Âm thanh xác nhận “đã bắt đầu quay” (cấu hình)
+
+- **Mục đích:** Giúp nhân viên **nghe thêm một tín hiệu rõ** rằng **ứng dụng đã chuyển sang đang ghi** (FFmpeg/phiên ghi đã khởi động thành công), bên cạnh tiếng phản hồi của **súng bắn mã** (nếu súng có loa/bíp riêng — app **không** điều khiển được phần đó). **Tách biệt** §1: âm này **không** mux vào file MP4.
+- **Cài đặt (MVP):**
+  - **Bật / tắt** toàn cục.
+  - **Nguồn âm thanh:** một trong hai — (a) **âm mặc định** kèm bản cài (ví dụ file `.wav` ngắn trong thư mục `resources`), hoặc (b) **đường dẫn file do user chọn** (ưu tiên **WAV** để phát nhanh, ổn định; **MP3** nếu dùng `QMediaPlayer` hoặc backend tương đương — **chốt trong plan**).
+  - **Điều khiển âm lượng** theo **mixer / thiết bị đầu ra mặc định của Windows** (app không bắt buộc có slider riêng trong MVP; có thể thêm sau).
+- **Khi phát:** **một lần**, ngay sau khi xác nhận **bắt đầu ghi thành công** — tức các trường hợp dẫn tới **mở phiên ghi mới** và FFmpeg đã accept (tương đương các ô §3.2: Idle → bắt đầu ghi; hoặc Đang ghi `A` → quét `B` → **bắt đầu** file mới cho `B`). **Không** phát khi chỉ **dừng** ghi; **không** phát khi quét trong §3.4 (hủy tắt máy); **không** phát nếu bật tắt âm = tắt hoặc lỗi tải file.
+- **Triển khai gợi ý:** `QSoundEffect` (WAV), hoặc `QMediaPlayer` / `QAudioOutput` (PySide6) — **chốt trong plan**; phát trên **luồng UI hoặc luồng phụ** để không block quét.
 
 ## 4. Lưu trữ và dọn dẹp 16 ngày
 
@@ -98,8 +110,9 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 | Camera / frame | **OpenCV** (`VideoCapture`), backend DirectShow trên Windows khi phù hợp |
 | Decode 1D + QR | Thư viện decode ổn định trên Windows (ví dụ **pyzbar** + runtime **ZBar**, hoặc phương án tương đương) — chốt trong plan nếu có ràng buộc license/binary |
 | Mã hóa / video | **FFmpeg** CLI (build static đi kèm bản phân phối): **MVP** — **một** đầu vào `dshow`; **giai đoạn 2** — hai đầu vào + `filter_complex` **overlay** (PIP); **không** map audio (`-an`) |
-| Cấu hình | JSON hoặc `QSettings` (đường dẫn root, **MVP:** một camera; **v2:** camera phụ + PIP, vị trí/kích thước PIP, bitrate/preset, **bật tắt máy hẹn giờ**, **giờ kích hoạt** `HH:mm`; runtime: **`next_shutdown_at`** — datetime lần tắt kế tiếp, cập nhật khi hủy bằng quét **+1 giờ**) |
-| Đóng gói | PyInstaller (hoặc tương đương) + ship `ffmpeg.exe` + DLL phụ thuộc decode |
+| Cấu hình | JSON hoặc `QSettings` (đường dẫn root, **MVP:** một camera; **v2:** camera phụ + PIP, vị trí/kích thước PIP, bitrate/preset, **bật tắt máy hẹn giờ**, **giờ kích hoạt** `HH:mm`; runtime **`next_shutdown_at`**; **âm báo bắt đầu ghi:** bật/tắt, đường dẫn file hoặc dùng âm mặc định kèm app) |
+| Phát âm quầy | **PySide6** `QSoundEffect` / `QMediaPlayer` (hoặc tương đương) — chỉ phản hồi UI, **không** mux vào MP4 |
+| Đóng gói | PyInstaller (hoặc tương đương) + ship `ffmpeg.exe` + DLL phụ thuộc decode (+ file âm mặc định nếu dùng) |
 
 ## 6. Video: MVP một nguồn và giai đoạn 2 (PIP)
 
@@ -110,7 +123,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 
 - **Luồng UI (main):** nhận tín hiệu từ worker, cập nhật trạng thái, không block khi quét/ghi.
 - **Worker quét (QThread):** lấy frame để decode (nguồn frame **chốt trong plan** cho MVP một camera: có thể từ `VideoCapture` cùng thiết bị, hoặc tách luồng nếu driver không cho mở song song với FFmpeg — tránh double-open khi không cần). Tần suất hợp lý (ví dụ 10–15 fps); emit signal sang main với chuỗi đơn đã chuẩn hóa.
-- **Điều khiển ghi:** mỗi phiên ghi tương ứng **một tiến trình FFmpeg**; chuyển đơn = **dừng hợp lệ** process hiện tại rồi spawn process mới với đường dẫn output mới.
+- **Điều khiển ghi:** mỗi phiên ghi tương ứng **một tiến trình FFmpeg**; chuyển đơn = **dừng hợp lệ** process hiện tại rồi spawn process mới với đường dẫn output mới; sau khi xác nhận **phiên mới đã ghi thành công**, nếu cấu hình bật thì kích hoạt **§3.6**.
 - **Preview (tuỳ chọn MVP):** hiển thị một camera hoặc lược đồ đơn giản; giảm FPS khi đang ghi để tiết kiệm CPU.
 - **Đồng hồ tắt máy:** `QTimer` kiểm tra định kỳ so sánh **`now` với `next_shutdown_at`** (datetime địa phương). Khởi động app: tính `next_shutdown_at` = lần tới tại **`HH:mm`** trong cấu hình (ngày hôm nay nếu chưa qua, không thì ngày kế). Khi **hủy bằng quét** trong đếm ngược: `next_shutdown_at = now + 1 giờ`. Khi tính năng **bật** và `now >= next_shutdown_at` và **không** đang trong đếm ngược, kích hoạt chuỗi mục 8.
 
@@ -151,6 +164,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 - **Tắt máy bị từ chối (policy / không đủ quyền):** thông báo; không giả định máy đã tắt.
 - **Đếm ngược tắt máy:** quét hủy **không** làm hỏng file đã dừng ở bước 1; xác nhận **`next_shutdown_at`** cập nhật đúng **+1 giờ**. **Camera/scanner lỗi trong 60s:** không thể quét hủy — hết giờ vẫn tắt theo bước 4; nếu cần **nút dự phòng** cho sự cố phần cứng, **chốt trong plan** (ngoài luồng “chỉ quét” lý tưởng).
 - **Trùng đơn:** thư mục ngày đã có `DON123_*.mp4` — quét `DON123` để **bắt đầu ghi lại** → có thông báo trùng, vẫn xuất hiện **file thứ hai** timestamp khác; quét `DON123` để **dừng** khi đang ghi → **không** bắt buộc báo trùng (hành động dừng).
+- **Âm báo bắt đầu ghi:** file âm user chọn **thiếu / định dạng không phát được** → ghi log + thông báo nhẹ (hoặc im lặng có log); **không** làm fail luồng ghi; tắt bằng cài đặt nếu cần.
 
 ## 11. Kiểm thử gợi ý
 
@@ -162,6 +176,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 - Retention: thư mục giả lập >16 ngày bị xóa đúng; thư mục không đúng format không bị đụng.
 - **Tắt máy hẹn giờ:** mock `next_shutdown_at` hoặc chỉnh giờ thử; UI **đếm ngược đúng 60s**; **quét bất kỳ mã** trong lúc đếm ngược → hủy, **không** gọi §3.2 cho lần quét đó; kiểm tra **`next_shutdown_at = now + 1h`**; sau hủy, quét đơn hoạt động lại bình thường; **không quét** → hết 60s → tắt máy (hoặc mô phỏng policy chặn).
 - **Trùng đơn:** tạo sẵn file giả trong thư mục ngày → quét cùng mã để mở ghi mới → có **thông báo** và **hai file** (hoặc nhiều hơn) cùng tiền tố đơn; xác nhận **không** modal chặn luồng làm việc.
+- **Âm báo:** bật — Idle → quét đơn → có **một** tiếng sau khi ghi chạy; Đang ghi `A` → quét `B` → có **một** tiếng khi file `B` bắt đầu; dừng ghi / đếm ngược tắt máy §3.4 → **không** phát; tắt trong cài đặt → im lặng.
 
 ## 12. Ngoài phạm vi MVP
 
