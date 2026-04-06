@@ -13,6 +13,7 @@ Xây dựng ứng dụng **desktop Windows** (64-bit, Windows 10 và 11) để:
 - **Không ghi âm** vào file.
 - Lưu file theo **đường dẫn gốc do người dùng cấu hình**, tự tạo **một thư mục theo ngày**.
 - **Tự động xóa** dữ liệu video cũ hơn **16 ngày** (an toàn, chỉ trong cấu trúc thư mục do app quản lý).
+- **Tự động tắt máy** vào **18:00** (6 giờ chiều) theo giờ hệ thống, có **bật/tắt** và có thể **đổi giờ** trong cài đặt; trước khi tắt phải **dừng ghi và giải phóng tài nguyên** an toàn.
 - Tối đa hóa khả năng **giải phóng camera và dừng FFmpeg** khi thoát bình thường hoặc lỗi; ghi nhận giới hạn khi process bị kill cứng.
 
 ## 2. Phạm vi phiên bản đầu (MVP)
@@ -20,6 +21,7 @@ Xây dựng ứng dụng **desktop Windows** (64-bit, Windows 10 và 11) để:
 - Một máy, một user vận hành tại quầy đóng gói.
 - Giao diện **chỉ chế độ sáng**, phong cách **Material / Google-inspired** (PySide6 + Qt Widgets + QSS, style nền Fusion).
 - Không yêu cầu đăng nhập, không đồng bộ cloud trong app (có thể lưu vào thư mục mà Google Drive / OneDrive client đồng bộ ngoài app).
+- **Tắt máy hẹn giờ:** mặc định **18:00** giờ địa phương Windows; có **công tắc bật/tắt** và ô chọn **giờ:phút** (để sau này đổi ca làm việc mà không sửa code).
 
 ## 3. Nghiệp vụ quét và trạng thái ghi
 
@@ -71,7 +73,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 | Camera / frame | **OpenCV** (`VideoCapture`), backend DirectShow trên Windows khi phù hợp |
 | Decode 1D + QR | Thư viện decode ổn định trên Windows (ví dụ **pyzbar** + runtime **ZBar**, hoặc phương án tương đương) — chốt trong plan nếu có ràng buộc license/binary |
 | Mã hóa / PIP | **FFmpeg** CLI (build static đi kèm bản phân phối), hai đầu vào `dshow`, `filter_complex` **overlay**; **không** map audio (`-an`) |
-| Cấu hình | JSON hoặc `QSettings` (đường dẫn root, chỉ số/tên thiết bị camera, vị trí/kích thước PIP, bitrate/preset) |
+| Cấu hình | JSON hoặc `QSettings` (đường dẫn root, chỉ số/tên thiết bị camera, vị trí/kích thước PIP, bitrate/preset, **bật tắt máy hẹn giờ**, **giờ kích hoạt** dạng `HH:mm` theo giờ máy) |
 | Đóng gói | PyInstaller (hoặc tương đương) + ship `ffmpeg.exe` + DLL phụ thuộc decode |
 
 ## 6. Video: PIP và một nguồn
@@ -85,8 +87,29 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 - **Worker quét (QThread):** lấy frame từ camera quét với tần suất hợp lý (ví dụ 10–15 fps); decode; emit signal sang main với chuỗi đơn đã chuẩn hóa.
 - **Điều khiển ghi:** mỗi phiên ghi tương ứng **một tiến trình FFmpeg**; chuyển đơn = **dừng hợp lệ** process hiện tại rồi spawn process mới với đường dẫn output mới.
 - **Preview (tuỳ chọn MVP):** hiển thị một camera hoặc lược đồ đơn giản; giảm FPS khi đang ghi để tiết kiệm CPU.
+- **Đồng hồ tắt máy:** `QTimer` kiểm tra định kỳ (ví dụ mỗi 30–60 giây) so sánh **giờ hệ thống địa phương** với giờ cấu hình; khi đạt ngưỡng và tính năng **bật**, kích hoạt chuỗi tắt máy (mục 8).
 
-## 8. Giải phóng tài nguyên và crash
+## 8. Tự động tắt máy sau giờ làm (mặc định 18:00)
+
+### 8.1 Hành vi
+
+- **Điều kiện:** tính năng **được bật** trong Cài đặt; app **đang chạy** tại thời điểm đến giờ (nếu app đã thoát trước đó, **sẽ không** tắt máy — không dùng Windows Task Scheduler trong MVP trừ khi bổ sung sau).
+- **Giờ kích hoạt:** mặc định **18:00** (6 giờ chiều) theo **múi giờ / giờ địa phương** của Windows; người dùng có thể đổi sang giờ khác (`HH:mm`).
+- **Một lần mỗi ngày:** sau khi đã thực hiện chuỗi tắt máy (hoặc sau khi người dùng **Hủy** trong hộp thoại đếm ngược — xem dưới), **không** kích hoạt lại cho đến **ngày lịch tiếp theo** (tránh bật lại liên tục nếu người dùng hủy shutdown hoặc shutdown thất bại).
+
+### 8.2 Trước khi gửi lệnh tắt Windows
+
+1. Nếu **đang ghi:** **dừng ghi** theo luồng chuẩn (đóng FFmpeg, hoàn tất file).
+2. Gọi **`shutdown()`** nội bộ của app: dừng worker quét, `release()` camera, dọn process con.
+3. Hiển thị **hộp thoại đếm ngược** (ví dụ **60 giây**) với nội dung rõ: *Máy sẽ tắt sau X giây*; nút **Hủy** để abort shutdown (app tiếp tục chạy; đánh dấu đã xử lý “lần trong ngày” để không lặp lại ngay).
+4. Gọi lệnh **tắt máy Windows** (ví dụ `shutdown /s /t <giây>` với `t` nhỏ nếu đã chờ trong app, hoặc `t 0` sau khi đã countdown trong UI — **chốt trong plan** để tránh hai lớp countdown chồng nhau).
+
+### 8.3 Quyền và lỗi
+
+- Một số máy / policy domain có thể **chặn** shutdown từ user: app phải **báo lỗi** rõ (không im lặng).
+- Ghi chú vận hành: cần quyền tắt máy phù hợp; nếu không, dùng **chỉ dừng ghi + thoát app** làm phương án dự phòng có thể cấu hình (tùy chọn sau MVP).
+
+## 9. Giải phóng tài nguyên và crash
 
 - Mọi `VideoCapture` đều có đường **`release()`** trong `try`/`finally` hoặc context manager tùy bọc.
 - Hàm **`shutdown()`** tập trung: dừng thread quét, `release()` camera, terminate/kill có kiểm soát **FFmpeg** child.
@@ -94,27 +117,30 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 - **Windows Job Object** gắn với tiến trình FFmpeg con (qua `ctypes` hoặc `pywin32`): khi process Python kết thúc, child không bị orphan giữ thiết bị.
 - **Giới hạn đã thống nhất với stakeholder:** `End Task` kill cứng hoặc mất điện có thể vẫn cần thao tác vật lý (rút USB / restart camera) — tài liệu vận hành ghi rõ.
 
-## 9. Lỗi và edge case
+## 10. Lỗi và edge case
 
 - **Ổ đầy / ghi UNC lỗi:** báo lỗi rõ; không giả định file luôn hoàn chỉnh nếu không stop FFmpeg bình thường.
 - **Mất camera giữa chừng:** dừng ghi, thông báo, không tự restart vô hạn (có thể nút “thử lại” thủ công).
 - **Quét trùng khi đang debounce:** bỏ qua log âm thầm hoặc một dòng log debug tùy cấu hình.
+- **Tắt máy bị từ chối (policy / không đủ quyền):** thông báo; không giả định máy đã tắt.
 
-## 10. Kiểm thử gợi ý
+## 11. Kiểm thử gợi ý
 
 - Hai webcam + một UNC + một thư mục đồng bộ (mô phỏng).
 - Chuỗi: A → B → C (chuyển đơn liên tục); A → A (toggle dừng).
 - Kill Python từ Task Manager: kiểm tra không còn `ffmpeg.exe` treo (Job Object).
 - Ngày sang thư mục mới sau nửa đêm (hoặc theo quy ước timezone trong plan).
 - Retention: thư mục giả lập >16 ngày bị xóa đúng; thư mục không đúng format không bị đụng.
+- **Tắt máy 18:00:** bật tính năng, chỉnh giờ thử nghiệm (hoặc mock thời gian trong plan); xác nhận đang ghi được dừng trước shutdown; **Hủy** trong countdown không corrupt file; sau **Hủy** không bị kích hoạt lại liên tục trong cùng ngày.
 
-## 11. Ngoài phạm vi MVP
+## 12. Ngoài phạm vi MVP
 
 - Chế độ tối (dark theme).
 - Đăng nhập đa user, phân quyền.
 - Upload trực tiếp lên cloud từ app.
 - Watermark, logo, hoặc burn timestamp lên video (có thể thêm sau).
+- Tắt máy khi **app không chạy** (ví dụ Lịch tác vụ Windows) — có thể thêm phiên bản sau nếu cần.
 
-## 12. Bước tiếp theo
+## 13. Bước tiếp theo
 
 Sau khi spec này được xác nhận lần cuối, tạo **implementation plan** chi tiết (tasks, thứ tự, rủi ro FFmpeg/OpenCV trên Windows, và chiến lược đóng gói).
