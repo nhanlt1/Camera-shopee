@@ -1,10 +1,13 @@
 @echo off
+REM Chay app trong phien Windows cua ban (khong gan voi terminal Cursor).
 cd /d "%~dp0"
 if not exist ".venv\Scripts\python.exe" (
-  echo Chua co .venv — chay: python -m venv .venv ^& .venv\Scripts\pip install -e ".[dev]"
+  echo Chua co .venv. Mo PowerShell tai thu muc nay va chay:
+  echo   python -m venv .venv
+  echo   .venv\Scripts\pip install -e ".[dev]"
   pause
   exit /b 1
 )
-echo Dang mo Pack Recorder...
-".venv\Scripts\python.exe" -m packrecorder
-if errorlevel 1 pause
+echo Dang mo Pack Recorder trong cua so rieng...
+start "" /D "%~dp0" "%~dp0.venv\Scripts\python.exe" -m packrecorder
+exit /b 0
