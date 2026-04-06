@@ -16,7 +16,7 @@ Xây dựng ứng dụng **desktop Windows** (64-bit, Windows 10 và 11) để:
 - **Không ghi âm** vào file.
 - Lưu file theo **đường dẫn gốc do người dùng cấu hình**, tự tạo **một thư mục theo ngày**.
 - **Tự động xóa** dữ liệu video cũ hơn **16 ngày** (an toàn, chỉ trong cấu trúc thư mục do app quản lý).
-- **Tự động tắt máy** vào **18:00** (6 giờ chiều) theo giờ hệ thống, có **bật/tắt** và có thể **đổi giờ** trong cài đặt; trước khi tắt phải **dừng ghi và giải phóng tài nguyên** an toàn.
+- **Tự động tắt máy** theo giờ cấu hình (mặc định **18:00**), có **bật/tắt** và **đổi giờ**; trước khi tắt: **dừng ghi** an toàn; hiển thị **đếm ngược 60 giây**; chỉ khi **hết giờ** mới giải phóng camera và gửi lệnh tắt Windows. **Hủy tắt máy:** người dùng **phải quét bất kỳ mã** (1D hoặc QR) hợp lệ trong lúc đếm ngược; khi hủy thành công, lần tự tắt **kế tiếp** được **hoãn thêm 1 giờ** kể từ lúc hủy.
 - Tối đa hóa khả năng **giải phóng camera và dừng FFmpeg** khi thoát bình thường hoặc lỗi; ghi nhận giới hạn khi process bị kill cứng.
 
 ## 2. Phạm vi phiên bản đầu (MVP)
@@ -25,7 +25,7 @@ Xây dựng ứng dụng **desktop Windows** (64-bit, Windows 10 và 11) để:
 - Một máy, một user vận hành tại quầy đóng gói.
 - Giao diện **chỉ chế độ sáng**, phong cách **Material / Google-inspired** (PySide6 + Qt Widgets + QSS, style nền Fusion).
 - Không yêu cầu đăng nhập, không đồng bộ cloud trong app (có thể lưu vào thư mục mà Google Drive / OneDrive client đồng bộ ngoài app).
-- **Tắt máy hẹn giờ:** mặc định **18:00** giờ địa phương Windows; có **công tắc bật/tắt** và ô chọn **giờ:phút** (để sau này đổi ca làm việc mà không sửa code).
+- **Tắt máy hẹn giờ:** mặc định **18:00** giờ địa phương Windows; có **công tắc bật/tắt** và ô chọn **giờ:phút**; đếm ngược **60s** trước khi tắt; **hủy bằng quét mã bất kỳ**; sau hủy **hoãn +1 giờ** cho lần tắt kế tiếp.
 
 ## 3. Nghiệp vụ quét và trạng thái ghi
 
@@ -53,6 +53,11 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 - **Debounce** khi cùng một mã lặp trong cửa sổ thời gian ngắn (ví dụ vài trăm ms) để tránh double-fire từ một lần quét vật lý.
 - Phản hồi UI: trạng thái rõ (đang ghi / chờ), có thể **beep hệ thống** hoặc đổi màu chip trạng thái (không ghi âm vào video).
 
+### 3.4 Ưu tiên khi đang đếm ngược tắt máy (60s)
+
+- Nếu UI đang ở chế độ **hẹn tắt máy — đếm ngược** (mục 8): mọi lần **decode thành công** (bất kỳ nội dung mã nào, 1D hoặc QR) **chỉ** dùng để **hủy lệnh tắt máy** — **không** áp dụng bảng trạng thái §3.2 (không bắt đầu/dừng/chuyển đơn từ lần quét đó).
+- Sau khi hủy thành công, quét trở lại hoạt động bình thường theo §3.2 (lưu ý: nếu bước 8 đã **dừng ghi** trước đếm ngược, người dùng cần quét đơn để ghi tiếp như bình thường).
+
 ## 4. Lưu trữ và dọn dẹp 16 ngày
 
 ### 4.1 Đường dẫn
@@ -79,7 +84,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 | Camera / frame | **OpenCV** (`VideoCapture`), backend DirectShow trên Windows khi phù hợp |
 | Decode 1D + QR | Thư viện decode ổn định trên Windows (ví dụ **pyzbar** + runtime **ZBar**, hoặc phương án tương đương) — chốt trong plan nếu có ràng buộc license/binary |
 | Mã hóa / video | **FFmpeg** CLI (build static đi kèm bản phân phối): **MVP** — **một** đầu vào `dshow`; **giai đoạn 2** — hai đầu vào + `filter_complex` **overlay** (PIP); **không** map audio (`-an`) |
-| Cấu hình | JSON hoặc `QSettings` (đường dẫn root, **MVP:** một camera; **v2:** camera phụ + PIP, vị trí/kích thước PIP, bitrate/preset, **bật tắt máy hẹn giờ**, **giờ kích hoạt** `HH:mm`) |
+| Cấu hình | JSON hoặc `QSettings` (đường dẫn root, **MVP:** một camera; **v2:** camera phụ + PIP, vị trí/kích thước PIP, bitrate/preset, **bật tắt máy hẹn giờ**, **giờ kích hoạt** `HH:mm`; runtime: **`next_shutdown_at`** — datetime lần tắt kế tiếp, cập nhật khi hủy bằng quét **+1 giờ**) |
 | Đóng gói | PyInstaller (hoặc tương đương) + ship `ffmpeg.exe` + DLL phụ thuộc decode |
 
 ## 6. Video: MVP một nguồn và giai đoạn 2 (PIP)
@@ -93,22 +98,23 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 - **Worker quét (QThread):** lấy frame để decode (nguồn frame **chốt trong plan** cho MVP một camera: có thể từ `VideoCapture` cùng thiết bị, hoặc tách luồng nếu driver không cho mở song song với FFmpeg — tránh double-open khi không cần). Tần suất hợp lý (ví dụ 10–15 fps); emit signal sang main với chuỗi đơn đã chuẩn hóa.
 - **Điều khiển ghi:** mỗi phiên ghi tương ứng **một tiến trình FFmpeg**; chuyển đơn = **dừng hợp lệ** process hiện tại rồi spawn process mới với đường dẫn output mới.
 - **Preview (tuỳ chọn MVP):** hiển thị một camera hoặc lược đồ đơn giản; giảm FPS khi đang ghi để tiết kiệm CPU.
-- **Đồng hồ tắt máy:** `QTimer` kiểm tra định kỳ (ví dụ mỗi 30–60 giây) so sánh **giờ hệ thống địa phương** với giờ cấu hình; khi đạt ngưỡng và tính năng **bật**, kích hoạt chuỗi tắt máy (mục 8).
+- **Đồng hồ tắt máy:** `QTimer` kiểm tra định kỳ so sánh **`now` với `next_shutdown_at`** (datetime địa phương). Khởi động app: tính `next_shutdown_at` = lần tới tại **`HH:mm`** trong cấu hình (ngày hôm nay nếu chưa qua, không thì ngày kế). Khi **hủy bằng quét** trong đếm ngược: `next_shutdown_at = now + 1 giờ`. Khi tính năng **bật** và `now >= next_shutdown_at` và **không** đang trong đếm ngược, kích hoạt chuỗi mục 8.
 
 ## 8. Tự động tắt máy sau giờ làm (mặc định 18:00)
 
 ### 8.1 Hành vi
 
-- **Điều kiện:** tính năng **được bật** trong Cài đặt; app **đang chạy** tại thời điểm đến giờ (nếu app đã thoát trước đó, **sẽ không** tắt máy — không dùng Windows Task Scheduler trong MVP trừ khi bổ sung sau).
-- **Giờ kích hoạt:** mặc định **18:00** (6 giờ chiều) theo **múi giờ / giờ địa phương** của Windows; người dùng có thể đổi sang giờ khác (`HH:mm`).
-- **Một lần mỗi ngày:** sau khi đã thực hiện chuỗi tắt máy (hoặc sau khi người dùng **Hủy** trong hộp thoại đếm ngược — xem dưới), **không** kích hoạt lại cho đến **ngày lịch tiếp theo** (tránh bật lại liên tục nếu người dùng hủy shutdown hoặc shutdown thất bại).
+- **Điều kiện:** tính năng **được bật** trong Cài đặt; app **đang chạy** tại thời điểm `now >= next_shutdown_at` (nếu app đã thoát, **sẽ không** tắt máy — không dùng Task Scheduler trong MVP trừ khi bổ sung sau).
+- **Giờ mặc định trong cài đặt:** **18:00** (6 giờ chiều) địa phương; user đổi được `HH:mm`. Giá trị này dùng để **tính lại** `next_shutdown_at` khi khởi động app hoặc khi user sửa cài đặt (**chốt trong plan**).
+- **Sau khi hủy bằng quét thành công:** `next_shutdown_at = thời điểm hủy thành công + 1 giờ` (cùng múi giờ máy). Có thể lặp lại nhiều lần trong ngày (mỗi lần hủy lại cộng thêm 1 giờ).
+- **Sau khi máy tắt thành công:** lần mở app sau, tính lại `next_shutdown_at` từ `HH:mm` cấu hình như khởi động bình thường.
 
-### 8.2 Trước khi gửi lệnh tắt Windows
+### 8.2 Chuỗi khi tới `next_shutdown_at` (đếm ngược 60s và hủy bằng quét)
 
 1. Nếu **đang ghi:** **dừng ghi** theo luồng chuẩn (đóng FFmpeg, hoàn tất file).
-2. Gọi **`shutdown()`** nội bộ của app: dừng worker quét, `release()` camera, dọn process con.
-3. Hiển thị **hộp thoại đếm ngược** (ví dụ **60 giây**) với nội dung rõ: *Máy sẽ tắt sau X giây*; nút **Hủy** để abort shutdown (app tiếp tục chạy; đánh dấu đã xử lý “lần trong ngày” để không lặp lại ngay).
-4. Gọi lệnh **tắt máy Windows** (ví dụ `shutdown /s /t <giây>` với `t` nhỏ nếu đã chờ trong app, hoặc `t 0` sau khi đã countdown trong UI — **chốt trong plan** để tránh hai lớp countdown chồng nhau).
+2. Hiển thị **hộp thoại / màn hình đếm ngược đúng 60 giây** (cập nhật mỗi giây), nội dung rõ: *Máy sẽ tắt sau X giây — **quét bất kỳ mã vạch hoặc QR hợp lệ để hủy***. **Không** dùng nút **Hủy** bằng chuột làm luồng chính (nếu cần nút dự phòng cho admin/kẹt phần cứng, **chốt trong plan** — mặc định vận hành: **chỉ quét**).
+3. **Trong suốt 60 giây:** **worker quét và camera vẫn hoạt động** (không gọi `release()` camera ở bước này). Mọi decode thành công được xử lý theo **§3.4** → **hủy tắt máy**: đóng hộp thoại đếm ngược, **không** gửi lệnh tắt Windows; cập nhật **`next_shutdown_at = now + 1 giờ`**; app tiếp tục (ghi hình đã dừng ở bước 1 — user quét đơn nếu muốn ghi tiếp).
+4. **Hết 60 giây** mà **không** có quét hủy: lúc này mới gọi **`shutdown()`** nội bộ app — dừng worker quét, `release()` camera, dọn FFmpeg — rồi gửi lệnh **tắt máy Windows** (tham số thời gian / `shutdown /s` — **chốt trong plan**, tránh countdown chồng hai lớp không cần thiết).
 
 ### 8.3 Quyền và lỗi
 
@@ -118,7 +124,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 ## 9. Giải phóng tài nguyên và crash
 
 - Mọi `VideoCapture` đều có đường **`release()`** trong `try`/`finally` hoặc context manager tùy bọc.
-- Hàm **`shutdown()`** tập trung: dừng thread quét, `release()` camera, terminate/kill có kiểm soát **FFmpeg** child.
+- Hàm **`shutdown()`** tập trung: dừng thread quét, `release()` camera, terminate/kill có kiểm soát **FFmpeg** child. Gọi **sau khi hết đếm ngược 60s** (mục 8.2 bước 4), khi **thoát app** bình thường, hoặc khi lỗi — **không** gọi full `release()` camera giữa chừng đếm ngược nếu vẫn cần quét để hủy (trừ khi user đóng app thủ công).
 - Đăng ký **`atexit`** và xử lý ngoại lệ toàn cục nơi phù hợp để gọi `shutdown()` khi thoát bình thường hoặc lỗi chưa bắt.
 - **Windows Job Object** gắn với tiến trình FFmpeg con (qua `ctypes` hoặc `pywin32`): khi process Python kết thúc, child không bị orphan giữ thiết bị.
 - **Giới hạn đã thống nhất với stakeholder:** `End Task` kill cứng hoặc mất điện có thể vẫn cần thao tác vật lý (rút USB / restart camera) — tài liệu vận hành ghi rõ.
@@ -129,6 +135,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 - **Mất camera giữa chừng:** dừng ghi, thông báo, không tự restart vô hạn (có thể nút “thử lại” thủ công).
 - **Quét trùng khi đang debounce:** bỏ qua log âm thầm hoặc một dòng log debug tùy cấu hình.
 - **Tắt máy bị từ chối (policy / không đủ quyền):** thông báo; không giả định máy đã tắt.
+- **Đếm ngược tắt máy:** quét hủy **không** làm hỏng file đã dừng ở bước 1; xác nhận **`next_shutdown_at`** cập nhật đúng **+1 giờ**. **Camera/scanner lỗi trong 60s:** không thể quét hủy — hết giờ vẫn tắt theo bước 4; nếu cần **nút dự phòng** cho sự cố phần cứng, **chốt trong plan** (ngoài luồng “chỉ quét” lý tưởng).
 
 ## 11. Kiểm thử gợi ý
 
@@ -138,7 +145,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 - Kill Python từ Task Manager: kiểm tra không còn `ffmpeg.exe` treo (Job Object).
 - Ngày sang thư mục mới sau nửa đêm (hoặc theo quy ước timezone trong plan).
 - Retention: thư mục giả lập >16 ngày bị xóa đúng; thư mục không đúng format không bị đụng.
-- **Tắt máy 18:00:** bật tính năng, chỉnh giờ thử nghiệm (hoặc mock thời gian trong plan); xác nhận đang ghi được dừng trước shutdown; **Hủy** trong countdown không corrupt file; sau **Hủy** không bị kích hoạt lại liên tục trong cùng ngày.
+- **Tắt máy hẹn giờ:** mock `next_shutdown_at` hoặc chỉnh giờ thử; UI **đếm ngược đúng 60s**; **quét bất kỳ mã** trong lúc đếm ngược → hủy, **không** gọi §3.2 cho lần quét đó; kiểm tra **`next_shutdown_at = now + 1h`**; sau hủy, quét đơn hoạt động lại bình thường; **không quét** → hết 60s → tắt máy (hoặc mô phỏng policy chặn).
 
 ## 12. Ngoài phạm vi MVP
 
