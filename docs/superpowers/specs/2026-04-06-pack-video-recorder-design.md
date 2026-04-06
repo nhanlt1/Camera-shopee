@@ -173,10 +173,50 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 - **Windows Job Object** gắn với tiến trình FFmpeg con (qua `ctypes` hoặc `pywin32`): khi process Python kết thúc, child không bị orphan giữ thiết bị.
 - **Giới hạn đã thống nhất với stakeholder:** `End Task` kill cứng hoặc mất điện có thể vẫn cần thao tác vật lý (rút USB / restart camera) — tài liệu vận hành ghi rõ.
 
+### 9.1 Lưu ý quan trọng: "Lúc đầu chạy được, sửa code xong mất camera"
+
+- **Hiện tượng rất phổ biến** khi lập trình tương tác camera trên Windows (OpenCV / DirectShow / Media Foundation): sau khi **debug**, **dừng debugger đột ngột**, **crash**, hoặc **exception** trước khi chạy xong nhánh giải phóng, hệ điều hành vẫn coi **process** (hoặc driver) đang **giữ khóa (lock)** thiết bị → lần chạy sau **không mở lại được** camera (báo không tìm thấy / không truy cập được).
+- **Nguyên nhân cốt lõi:** **rò rỉ tài nguyên / chưa `release()`** (hoặc subprocess FFmpeg **dshow** vẫn sống) — không phải lỗi "hỏng camera" vật lý.
+
+### 9.2 Best practice trong code (bắt buộc áp dụng khi triển khai)
+
+- Bọc mọi đường mở camera (`VideoCapture`, mở pipeline FFmpeg trỏ vào cùng thiết bị) bằng **`try` / `finally`** (hoặc context manager) sao cho **`release()`** / **`stop()`** / **đóng stdin FFmpeg** **luôn** được gọi khi thoát khối, kể khi có exception.
+- Một hàm **`shutdown()`** duy nhất gom: dừng thread, `cap.release()` nếu `isOpened()`, kill/ghi process con có thứ tự an toàn.
+- **Ví dụ mẫu OpenCV (Python)** — nguyên tắc: **`finally` luôn gọi `release()`**:
+
+```python
+import cv2
+
+cap = cv2.VideoCapture(0)
+try:
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        # xử lý…
+finally:
+    if cap.isOpened():
+        cap.release()
+```
+
+- Với **nhiều capture** (hoặc sau này hai camera): **`release()` từng cái trong `finally`**, không bỏ sót.
+
+### 9.3 Chữa nhanh khi camera đã bị kẹt (không cần reboot máy)
+
+1. **Task Manager:** kết thúc mọi **`python.exe`** / **`PackRecorder.exe`** / tiến trình app còn sót (kể cả treo sau debug).
+2. **Webcam USB:** **rút và cắm lại** cổng USB — reset trạng thái thiết bị nhanh nhất.
+3. **Camera tích hợp:** **Device Manager** → *Camera* / *Imaging devices* → **Disable** rồi **Enable** lại thiết bị.
+
+### 9.4 Băng thông USB (khi có từ hai nguồn video hoặc giai đoạn 2 — hai webcam)
+
+- Hai webcam cắm **cùng một hub** / hai cổng **cùng controller** dễ gây **giật, rớt khung hình, mất tín hiệu xen kẽ** — dễ nhầm với "mất camera".
+- **Gợi ý:** tách cổng (trước/sau case), kết hợp **USB 2.0 + USB 3.0** nếu có; cân nhắc **giảm độ phân giải / FPS** khi không cần tối đa.
+
 ## 10. Lỗi và edge case
 
 - **Ổ đầy / ghi UNC lỗi:** báo lỗi rõ; không giả định file luôn hoàn chỉnh nếu không stop FFmpeg bình thường.
 - **Mất camera giữa chừng:** dừng ghi, thông báo, không tự restart vô hạn (có thể nút “thử lại” thủ công).
+- **Sau debug / crash — OS vẫn giữ lock:** xem **§9.1–§9.3**; ưu tiên kill process + rút USB / reset driver trước khi kết luận hỏng phần cứng.
 - **Quét trùng khi đang debounce:** bỏ qua log âm thầm hoặc một dòng log debug tùy cấu hình.
 - **Tắt máy bị từ chối (policy / không đủ quyền):** thông báo; không giả định máy đã tắt.
 - **Đếm ngược tắt máy:** quét hủy **không** làm hỏng file đã dừng ở bước 1; xác nhận **`next_shutdown_at`** cập nhật đúng **+1 giờ**. **Camera/scanner lỗi trong 60s:** không thể quét hủy — hết giờ vẫn tắt theo bước 4; nếu cần **nút dự phòng** cho sự cố phần cứng, **chốt trong plan** (ngoài luồng “chỉ quét” lý tưởng).
@@ -188,7 +228,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 - **MVP:** **một** webcam + đường dẫn local và (tuỳ) UNC / thư mục đồng bộ — xác nhận ghi ổn trước khi mở rộng.
 - **Giai đoạn 2:** hai webcam, PIP, chuyển đơn dưới tải hai nguồn.
 - Chuỗi: A → B → C (chuyển đơn liên tục); A → A (toggle dừng).
-- Kill Python từ Task Manager: kiểm tra không còn `ffmpeg.exe` treo (Job Object).
+- Kill Python từ Task Manager: kiểm tra không còn `ffmpeg.exe` treo (Job Object); sau đó xác nhận **mở lại camera** được (§9.3 nếu vẫn kẹt).
 - Ngày sang thư mục mới sau nửa đêm (hoặc theo quy ước timezone trong plan).
 - Retention: thư mục giả lập >16 ngày bị xóa đúng; thư mục không đúng format không bị đụng.
 - **Tắt máy hẹn giờ:** mock `next_shutdown_at` hoặc chỉnh giờ thử; UI **đếm ngược đúng 60s**; **quét bất kỳ mã** trong lúc đếm ngược → hủy, **không** gọi §3.2 cho lần quét đó; kiểm tra **`next_shutdown_at = now + 1h`**; sau hủy, quét đơn hoạt động lại bình thường; **không quét** → hết 60s → tắt máy (hoặc mô phỏng policy chặn).

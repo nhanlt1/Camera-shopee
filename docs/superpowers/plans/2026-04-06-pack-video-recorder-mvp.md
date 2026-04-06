@@ -43,6 +43,12 @@
 
 **Giai đoạn 2** (PIP hai nguồn): tách plan sau — không nằm trong file này.
 
+### Lưu ý triển khai / debug camera (bắt buộc đọc — spec §9.1–§9.4)
+
+- **Resource leak:** Dừng debugger / crash trước `VideoCapture.release()` khiến Windows **giữ lock** → lần sau "mất camera". Mọi đường mở capture phải **`try`/`finally`** hoặc class có `close()` gọi từ **`atexit`** và khi đóng app.
+- **Chữa nhanh:** Task Manager kill `python.exe` / app; USB **rút cắm lại**; Device Manager **Disable/Enable** camera tích hợp — ghi vào **`README.md`** mục Troubleshooting.
+- **Hai webcam (giai đoạn 2 hoặc test):** tránh hai cổng chung hub; xem **§9.4** băng thông USB.
+
 ---
 
 ### Task 1: Project scaffold
@@ -1005,7 +1011,7 @@ git commit -m "feat(config): json persistence for app settings"
 **Files:**
 - Create: `src/packrecorder/scan_worker.py`
 
-- [ ] **Step 1: Implement** `ScanWorker(QThread)` with `time.monotonic()` debounce 350ms, `pyzbar.decode`, emit `decoded.emit(str)` only when code changes or debounce window passed.
+- [ ] **Step 1: Implement** `ScanWorker(QThread)` with `time.monotonic()` debounce 350ms, `pyzbar.decode`, emit `decoded.emit(str)` only when code changes or debounce window passed. **`run()` bọc `try`/`finally`:** trong `finally` gọi `cap.release()` nếu `isOpened()` — tránh **§9.1** lock sau khi dừng thread / exception; hỗ trợ cờ `requestInterruption()` hoặc `stop_event` để thoát vòng lặp sạch.
 
 - [ ] **Step 2: Manual test** with webcam printed QR.
 
@@ -1126,7 +1132,7 @@ git commit -m "feat(settings): configure root path camera and shutdown"
 
 **Files:**
 - Create: `packrecorder.spec` (PyInstaller)
-- Create: `README.md` (operator: install ZBar DLL, place ffmpeg.exe)
+- Create: `README.md` (operator: ZBar DLL, `ffmpeg.exe`, **Troubleshooting:** camera kẹt sau debug — spec §9.3; USB hub §9.4)
 
 - [ ] **Step 1: Command**
 
@@ -1162,7 +1168,7 @@ git commit -m "build: pyinstaller spec and operator readme"
 | §3.6 beep patterns | Task 11; `ScannerHostBeep` stub in Task 11 file |
 | §4 paths / retention / **packer trong tên file** | Task 2 (`sanitize_packer_label`), 3 (glob `maDon_` vẫn khớp), 9, 12, 14 |
 | §8 shutdown flow | Task 6, 13 |
-| §9 Job Object, shutdown cleanup | Task 7, 8, 13, 12 `atexit` hook |
+| §9 Job Object, shutdown cleanup, **§9.1–9.4 camera lock / USB** | Task 7, 8, 13, 12 `atexit` + **README Troubleshooting**; `ScanWorker` / capture **`finally` release** |
 | §12 Phase 2 PIP | Out of scope — separate plan |
 
 **2. Placeholder scan:** No `TBD` in executable steps; WAV files documented via README; scanner host beep explicitly `NullScannerHostBeep` until model known.
