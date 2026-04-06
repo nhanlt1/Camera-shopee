@@ -16,7 +16,7 @@ Xây dựng ứng dụng **desktop Windows** (64-bit, Windows 10 và 11) để:
 - **MVP:** Mỗi phiên ghi là **một file MP4** từ **một nguồn** (full frame HD), **không** PIP.
 - **Không ghi âm** vào file video.
 - **Phản hồi âm thanh quầy (tùy cấu hình):** khi **súng có loa/bíp riêng** và cho phép **điều khiển từ máy tính**, app thực hiện **mẫu bíp** theo §3.6 — **không** đưa âm này vào MP4. Nếu súng **không** nhận lệnh từ host (chỉ bíp cố định lúc quét), dùng **loa PC** phát âm **tương đương** (fallback §3.6).
-- Lưu file theo **đường dẫn gốc do người dùng cấu hình**, tự tạo **một thư mục theo ngày**.
+- Lưu file theo **đường dẫn gốc do người dùng cấu hình**, tự tạo **một thư mục theo ngày**; tên file gồm **mã đơn**, **nhãn máy/người gói** (cài đặt), và timestamp — xem §4.2.
 - **Tự động xóa** dữ liệu video cũ hơn **16 ngày** (an toàn, chỉ trong cấu trúc thư mục do app quản lý).
 - **Tự động tắt máy** theo giờ cấu hình (mặc định **18:00**), có **bật/tắt** và **đổi giờ**; trước khi tắt: **dừng ghi** an toàn; hiển thị **đếm ngược 60 giây**; chỉ khi **hết giờ** mới giải phóng camera và gửi lệnh tắt Windows. **Hủy tắt máy:** người dùng **phải quét bất kỳ mã** (1D hoặc QR) hợp lệ trong lúc đếm ngược; khi hủy thành công, lần tự tắt **kế tiếp** được **hoãn thêm 1 giờ** kể từ lúc hủy.
 - Tối đa hóa khả năng **giải phóng camera và dừng FFmpeg** khi thoát bình thường hoặc lỗi; ghi nhận giới hạn khi process bị kill cứng.
@@ -30,6 +30,7 @@ Xây dựng ứng dụng **desktop Windows** (64-bit, Windows 10 và 11) để:
 - **Tắt máy hẹn giờ:** mặc định **18:00** giờ địa phương Windows; có **công tắc bật/tắt** và ô chọn **giờ:phút**; đếm ngược **60s** trước khi tắt; **hủy bằng quét mã bất kỳ**; sau hủy **hoãn +1 giờ** cho lần tắt kế tiếp.
 - **Trùng đơn:** có **cơ chế báo** khi đơn đã có video trong ngày; **không chặn** ghi thêm.
 - **Mẫu bíp / âm báo:** **bật/tắt**, chế độ **súng (host)** hoặc **loa máy (fallback)**, tham số độ dài bíp — xem §3.6.
+- **Tên máy / người gói:** trong **Cài đặt**, chọn hoặc nhập **nhãn hiển thị** cho quầy (ví dụ phân biệt hai máy cùng lưu chung một thư mục gốc). **Gợi ý mặc định trong UI:** **Máy 1**, **Máy 2** (preset); có thể đổi thành tên tùy ý (vẫn sanitize khi đặt tên file).
 
 ## 3. Nghiệp vụ quét và trạng thái ghi
 
@@ -37,6 +38,7 @@ Xây dựng ứng dụng **desktop Windows** (64-bit, Windows 10 và 11) để:
 
 - **MVP — một camera:**
   - Một mục chọn **Camera** (nguồn duy nhất cho cả **ghi** và **quét** trên cùng thiết bị).
+  - **Tên máy / người gói:** ô chọn **combo** hoặc có thể sửa tay — preset **Máy 1**, **Máy 2**; giá trị lưu trong cấu hình và đưa vào **tên file** §4.2 (sanitize giống mã đơn: **không** chứa `_` trong phần nhãn; ký tự không hợp lệ Windows thay thế).
 - **Giai đoạn 2** (sau khi MVP ổn định):
   - **Camera ghi — khung chính** (PIP lớn).
   - **Camera ghi — khung phụ** (PIP nhỏ).
@@ -104,7 +106,11 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 ### 4.2 Cấu trúc thư mục
 
 - Mỗi ngày một thư mục con: `{Root}/yyyy-MM-dd/`.
-- Tên file video: `{maDon}_{yyyyMMdd-HHmmss}.mp4` sau khi **sanitize** ký tự không hợp lệ trên Windows (`<>:"/\|?*` và ký tự điều khiển). **Bổ sung:** trong phần `{maDon}`, **không giữ ký tự `_`** (thay bằng `-` hoặc bỏ) để trùng đơn §3.5 so khớp tiền tố `"{maDon}_"` không bị sai lệch.
+- Tên file video: **`{maDon}_{packer}_{yyyyMMdd-HHmmss}.mp4`** — trong đó:
+  - `{maDon}`: mã đơn đã **sanitize** (ký tự không hợp lệ Windows loại bỏ/thay; **không** chứa `_`, thay bằng `-` hoặc bỏ).
+  - `{packer}`: **nhãn máy / người gói** từ cài đặt, **sanitize** giống mã đơn (ký tự không hợp lệ, **`_` → `-`**, **khoảng trắng → `-`**) để toàn bộ tên file chỉ dùng `_` làm ranh giới giữa ba phần: đơn — nhãn — timestamp.
+  - `{yyyyMMdd-HHmmss}`: thời điểm bắt đầu phiên ghi (giờ địa phương).
+- **Mặc định gợi ý nhãn:** lần đầu cài hoặc reset, có thể đặt sẵn **Máy 1**; preset UI **Máy 1** / **Máy 2** để chọn nhanh khi hai máy tính dùng chung `Root`.
 
 ### 4.3 Retention
 
@@ -121,7 +127,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 | Camera / frame | **OpenCV** (`VideoCapture`), backend DirectShow trên Windows khi phù hợp |
 | Decode 1D + QR | Thư viện decode ổn định trên Windows (ví dụ **pyzbar** + runtime **ZBar**, hoặc phương án tương đương) — chốt trong plan nếu có ràng buộc license/binary |
 | Mã hóa / video | **FFmpeg** CLI (build static đi kèm bản phân phối): **MVP** — **một** đầu vào `dshow`; **giai đoạn 2** — hai đầu vào + `filter_complex` **overlay** (PIP); **không** map audio (`-an`) |
-| Cấu hình | JSON hoặc `QSettings` (đường dẫn root, **MVP:** một camera; **v2:** camera phụ + PIP, bitrate; **tắt máy:** bật/tắt, `HH:mm`, runtime `next_shutdown_at`; **§3.6:** bật/tắt, súng vs loa máy, ms / WAV từng mẫu, cổng SDK súng nếu có) |
+| Cấu hình | JSON hoặc `QSettings` (đường dẫn root, **MVP:** một camera, **`packer_label`** mặc định gợi ý **Máy 1**, preset **Máy 1**/**Máy 2**; **v2:** camera phụ + PIP, bitrate; **tắt máy:** bật/tắt, `HH:mm`, runtime `next_shutdown_at`; **§3.6:** …) |
 | Phát âm quầy | Lệnh **SDK/COM** súng (nếu hỗ trợ) **hoặc** **PySide6** `QSoundEffect` / `QMediaPlayer` — **không** mux vào MP4 |
 | Đóng gói | PyInstaller + `ffmpeg.exe` + DLL decode (+ WAV mẫu cho 1/2/dài nếu dùng loa máy) |
 
@@ -188,6 +194,7 @@ Giả định chuỗi decode được chuẩn hóa (trim, có thể quy tắc ch
 - **Tắt máy hẹn giờ:** mock `next_shutdown_at` hoặc chỉnh giờ thử; UI **đếm ngược đúng 60s**; **quét bất kỳ mã** trong lúc đếm ngược → hủy, **không** gọi §3.2 cho lần quét đó; kiểm tra **`next_shutdown_at = now + 1h`**; sau hủy, quét đơn hoạt động lại bình thường; **không quét** → hết 60s → tắt máy (hoặc mô phỏng policy chặn).
 - **Trùng đơn:** tạo sẵn file giả trong thư mục ngày → quét cùng mã để mở ghi mới → có **thông báo** và **hai file** (hoặc nhiều hơn) cùng tiền tố đơn; xác nhận **không** modal chặn luồng làm việc.
 - **§3.6:** Idle → bắt đầu ghi (không trùng) → **1 bíp ngắn**; quét dừng → **2 bíp ngắn**; bắt đầu khi trùng đơn → **1 bíp dài** (không thêm 1 ngắn); `A`→`B` → **2 ngắn** rồi **1 ngắn** hoặc **1 dài** nếu `B` trùng; §3.4 → không mẫu §3.6; tắt cài đặt → im lặng.
+- **Nhãn gói:** đổi **Máy 1** ↔ **Máy 2** trong cài đặt → file mới có segment packer khác (`…_Máy-1_…` vs `…_Máy-2_…`); trùng đơn §3.5 vẫn chỉ theo **mã đơn** (tiền tố `{maDon}_`).
 
 ## 12. Ngoài phạm vi MVP
 

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a Windows 64-bit desktop app (Python 3.11+, PySide6) that records one HD camera to dated folders, drives recording via scanned order codes (1D+QR from camera frames), enforces duplicate-order UI + long beep, retention (16 days), scheduled shutdown with 60s scan-to-cancel, FFmpeg child cleanup via Job Object, and speaker fallback beep patterns per spec `docs/superpowers/specs/2026-04-06-pack-video-recorder-design.md`.
+**Goal:** Ship a Windows 64-bit desktop app (Python 3.11+, PySide6) that records one HD camera to dated folders, names files with **order id + packer label** (settings default/preset **Máy 1** / **Máy 2**), drives recording via scanned order codes (1D+QR from camera frames), enforces duplicate-order UI + long beep, retention (16 days), scheduled shutdown with 60s scan-to-cancel, FFmpeg child cleanup via Job Object, and speaker fallback beep patterns per spec `docs/superpowers/specs/2026-04-06-pack-video-recorder-design.md`.
 
 **Architecture:** Pure-Python domain modules (`paths`, `order_state`, `duplicate`, `retention`, `shutdown_scheduler`) are tested with pytest. UI (`PySide6`) orchestrates a `ScanWorker` (`QThread` + OpenCV + pyzbar) and a `RecordingSession` that owns **one** camera path: **OpenCV reads BGR frames** and pipes raw video into **FFmpeg** (`libx264`, `-an`) so the camera is not double-opened by FFmpeg dshow and OpenCV simultaneously (common Windows failure mode). Optional **keyboard-wedge** barcode path can be added later as a plugin; MVP follows spec camera decode. `windows_job.py` attaches FFmpeg PID to a Win32 Job Object so parent exit kills the child. Sounds: `FeedbackPlayer` uses `QSoundEffect` WAV triplets (short / double short / long) when scanner host API is absent (stub `ScannerHostBeep` no-op for MVP).
 
@@ -18,8 +18,8 @@
 | `src/packrecorder/__init__.py` | version |
 | `src/packrecorder/__main__.py` | `main()` entry |
 | `src/packrecorder/app.py` | `QApplication`, Fusion style, load QSS, `MainWindow` |
-| `src/packrecorder/config.py` | `AppConfig` dataclass, JSON load/save, defaults (18:00, retention 16, beep ms) |
-| `src/packrecorder/paths.py` | `sanitize_order_id`, `day_folder_name`, `build_output_path` |
+| `src/packrecorder/config.py` | `AppConfig` … **`packer_label`** default `"Máy 1"` |
+| `src/packrecorder/paths.py` | `sanitize_order_id`, `sanitize_packer_label` (spaces→`-`, same invalid rules), `build_output_path(..., packer_raw, ...)` → `{maDon}_{packer}_{stamp}.mp4` |
 | `src/packrecorder/duplicate.py` | `is_duplicate_order(root: Path, order_id: str, today: date) -> bool` |
 | `src/packrecorder/retention.py` | `purge_old_day_folders(root: Path, keep_days: int, today: date) -> list[Path]` |
 | `src/packrecorder/order_state.py` | pure transitions + `TransitionResult` (start/stop/switch + flags for duplicate check, sounds) |
@@ -30,7 +30,7 @@
 | `src/packrecorder/feedback_sound.py` | `FeedbackPlayer` short / double / long |
 | `src/packrecorder/scanner_host_beep.py` | `ScannerHostBeep` ABC + `NullScannerHostBeep` |
 | `src/packrecorder/ui/main_window.py` | status chips, status bar messages, wire state machine |
-| `src/packrecorder/ui/settings_dialog.py` | root path, camera index, times, toggles |
+| `src/packrecorder/ui/settings_dialog.py` | root path, camera index, **packer combo** (preset **Máy 1**, **Máy 2**, editable), times, toggles |
 | `src/packrecorder/ui/countdown_dialog.py` | 60s, scan cancel, `scan_cancelled` signal |
 | `src/packrecorder/ui/styles.qss` | Material-like light theme |
 | `resources/sounds/README.txt` | instruct to add WAV or use generated |
@@ -133,19 +133,29 @@ git commit -m "chore: scaffold packrecorder package"
 from datetime import datetime
 from pathlib import Path
 
-from packrecorder.paths import build_output_path, sanitize_order_id
+from packrecorder.paths import (
+    build_output_path,
+    sanitize_order_id,
+    sanitize_packer_label,
+)
 
 
 def test_sanitize_replaces_invalid_chars_and_underscore():
-    assert sanitize_order_id('a/b<c>') == "a-b-c-"
-    assert sanitize_order_id('ORD_001') == "ORD-001"
+    assert sanitize_order_id("a/b<c>") == "a-b-c-"
+    assert sanitize_order_id("ORD_001") == "ORD-001"
 
 
-def test_build_output_path_pattern():
+def test_sanitize_packer_spaces_underscore():
+    assert sanitize_packer_label("Máy 1") == "Máy-1"
+    assert sanitize_packer_label("Máy 2") == "Máy-2"
+    assert sanitize_packer_label("A_B C") == "A-B-C"
+
+
+def test_build_output_path_includes_packer():
     root = Path("D:/root")
     dt = datetime(2026, 4, 6, 14, 30, 0)
-    p = build_output_path(root, "ORD001", dt)
-    assert p == Path("D:/root/2026-04-06/ORD001_20260406-143000.mp4")
+    p = build_output_path(root, "ORD001", "Máy 1", dt)
+    assert p == Path("D:/root/2026-04-06/ORD001_Máy-1_20260406-143000.mp4")
 ```
 
 - [ ] **Step 2: Run test — expect FAIL**
@@ -175,15 +185,27 @@ def sanitize_order_id(raw: str) -> str:
     return s or "ORDER"
 
 
+def sanitize_packer_label(raw: str) -> str:
+    s = raw.strip()
+    s = _INVALID.sub("-", s)
+    s = s.replace("_", "-")
+    s = s.replace(" ", "-")
+    s = re.sub(r"-{2,}", "-", s).strip("-")
+    return s or "Máy-1"
+
+
 def day_folder_name(d: date) -> str:
     return d.isoformat()
 
 
-def build_output_path(root: Path, order_id_raw: str, when: datetime) -> Path:
+def build_output_path(
+    root: Path, order_id_raw: str, packer_raw: str, when: datetime
+) -> Path:
     oid = sanitize_order_id(order_id_raw)
+    pk = sanitize_packer_label(packer_raw)
     day = day_folder_name(when.date())
     stamp = when.strftime("%Y%m%d-%H%M%S")
-    return root / day / f"{oid}_{stamp}.mp4"
+    return root / day / f"{oid}_{pk}_{stamp}.mp4"
 ```
 
 - [ ] **Step 4: Run test — expect PASS**
@@ -194,7 +216,7 @@ Run: `pytest tests/test_paths.py -v`
 
 ```bash
 git add src/packrecorder/paths.py tests/test_paths.py
-git commit -m "feat(paths): sanitize order id and build output path"
+git commit -m "feat(paths): packer label in filename Máy-1 Máy-2 pattern"
 ```
 
 ---
@@ -222,7 +244,7 @@ def test_duplicate_when_prefix_exists(tmp_path: Path):
     day_dir = root / day.isoformat()
     day_dir.mkdir(parents=True)
     oid = sanitize_order_id("DON1")
-    (day_dir / f"{oid}_20260406-120000.mp4").write_bytes(b"")
+    (day_dir / f"{oid}_Máy-1_20260406-120000.mp4").write_bytes(b"")
     assert is_duplicate_order(root, "DON1", day) is True
 
 
@@ -930,14 +952,19 @@ from packrecorder.config import AppConfig, load_config, save_config
 
 def test_save_load(tmp_path: Path):
     p = tmp_path / "c.json"
-    c = AppConfig(video_root=str(tmp_path / "v"), camera_index=0)
+    c = AppConfig(
+        video_root=str(tmp_path / "v"),
+        camera_index=0,
+        packer_label="Máy 2",
+    )
     save_config(p, c)
     c2 = load_config(p)
     assert c2.video_root == c.video_root
     assert c2.camera_index == 0
+    assert c2.packer_label == "Máy 2"
 ```
 
-- [ ] **Step 2: Implement `AppConfig` as dataclass** with fields: `video_root`, `camera_index`, `shutdown_enabled`, `shutdown_time_hhmm` (default `"18:00"`), `sound_enabled`, `sound_mode` (`speaker`/`scanner_host`), `beep_short_ms`, `beep_gap_ms`, `beep_long_ms`, paths to optional WAVs.
+- [ ] **Step 2: Implement `AppConfig` as dataclass** with fields: `video_root`, `camera_index`, **`packer_label: str = "Máy 1"`**, `shutdown_enabled`, `shutdown_time_hhmm` (default `"18:00"`), `sound_enabled`, `sound_mode` (`speaker`/`scanner_host`), `beep_short_ms`, `beep_gap_ms`, `beep_long_ms`, paths to optional WAVs.
 
 Use `dataclasses.asdict` + `json.dump`.
 
@@ -1026,7 +1053,7 @@ def main() -> None:
     raise SystemExit(run_app())
 ```
 
-- [ ] **Step 3: `MainWindow`** wires: load config, `QTimer` 45s for `purge_old_day_folders` + `compute_next_shutdown_at` refresh on startup, `ScanWorker`, `OrderStateMachine`, on start recording resolve duplicate with `is_duplicate_order`, show `QStatusBar` message 5s, call `FeedbackPlayer.sound_for_start`, spawn `FFmpegPipeRecorder` with frame size from `cap.get(cv2.CAP_PROP_FRAME_WIDTH/HEIGHT)`, in timer read frame write `write_frame`, on stop `recorder.stop()`, play sounds per `sound_immediate`.
+- [ ] **Step 3: `MainWindow`** wires: load config, `QTimer` 45s for `purge_old_day_folders` + `compute_next_shutdown_at` refresh on startup, `ScanWorker`, `OrderStateMachine`, on start recording resolve duplicate with `is_duplicate_order`, show `QStatusBar` message 5s, call `FeedbackPlayer.sound_for_start`, **`build_output_path(root, order, config.packer_label, datetime.now())`**, spawn `FFmpegPipeRecorder` with frame size from `cap.get(cv2.CAP_PROP_FRAME_WIDTH/HEIGHT)`, in timer read frame write `write_frame`, on stop `recorder.stop()`, play sounds per `sound_immediate`; **status bar** có thể hiển thị nhãn **Máy 1**/**Máy 2** đang chọn.
 
 - [ ] **Step 4: Run** — `python -m packrecorder` (from `src` on PYTHONPATH or pip -e).
 
@@ -1063,7 +1090,7 @@ git commit -m "feat(shutdown): 60s scan-cancel and windows shutdown"
 **Files:**
 - Create: `src/packrecorder/ui/settings_dialog.py`
 
-- [ ] **Step 1: Fields** per `AppConfig`; on save re-init `next_shutdown_at`.
+- [ ] **Step 1: Fields** per `AppConfig` — **`QComboBox` editable** với `addItems(["Máy 1", "Máy 2"])` làm preset; lưu `currentText()` vào `packer_label`; on save re-init `next_shutdown_at`.
 
 - [ ] **Step 2: Commit**
 
@@ -1112,7 +1139,7 @@ git commit -m "build: pyinstaller spec and operator readme"
 | §3.4 shutdown scan priority | Task 12 flag `is_shutdown_countdown` + 13 |
 | §3.5 duplicate + long beep only | Task 3, 12, 11 |
 | §3.6 beep patterns | Task 11; `ScannerHostBeep` stub in Task 11 file |
-| §4 paths / retention | Task 2, 4, 12 timer |
+| §4 paths / retention / **packer trong tên file** | Task 2 (`sanitize_packer_label`), 3 (glob `maDon_` vẫn khớp), 9, 12, 14 |
 | §8 shutdown flow | Task 6, 13 |
 | §9 Job Object, shutdown cleanup | Task 7, 8, 13, 12 `atexit` hook |
 | §12 Phase 2 PIP | Out of scope — separate plan |
