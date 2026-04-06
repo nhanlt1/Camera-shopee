@@ -4,7 +4,7 @@
 
 **Goal:** Ship a Windows 64-bit desktop app (Python 3.11+, PySide6) that records one HD camera to dated folders, names files with **order id + packer label** (settings default/preset **Máy 1** / **Máy 2**), drives recording via scanned order codes (1D+QR from camera frames), enforces duplicate-order UI + long beep, retention (16 days), scheduled shutdown with 60s scan-to-cancel, FFmpeg child cleanup via Job Object, and speaker fallback beep patterns per spec `docs/superpowers/specs/2026-04-06-pack-video-recorder-design.md`.
 
-**Architecture:** Pure-Python domain modules (`paths`, `order_state`, `duplicate`, `retention`, `shutdown_scheduler`) are tested with pytest. UI (`PySide6`) orchestrates a `ScanWorker` (`QThread` + OpenCV + pyzbar) and a `RecordingSession` that owns **one** camera path: **OpenCV reads BGR frames** and pipes raw video into **FFmpeg** (`libx264`, `-an`) so the camera is not double-opened by FFmpeg dshow and OpenCV simultaneously (common Windows failure mode). Optional **keyboard-wedge** barcode path can be added later as a plugin; MVP follows spec camera decode. `windows_job.py` attaches FFmpeg PID to a Win32 Job Object so parent exit kills the child. Sounds: `FeedbackPlayer` uses `QSoundEffect` WAV triplets (short / double short / long) when scanner host API is absent (stub `ScannerHostBeep` no-op for MVP).
+**Architecture:** Pure-Python domain modules (`paths`, `order_state`, `duplicate`, `retention`, `shutdown_scheduler`) are tested with pytest. **All user-facing strings and JSON config use UTF-8** (`open(..., encoding="utf-8")`, `json.dump(..., ensure_ascii=False)`); `sanitize_packer_label` / `sanitize_order_id` **only** strip or replace **Windows-forbidden** filename characters—**Unicode letters (e.g. Vietnamese) stay** in `{packer}` and in filenames. UI (`PySide6`) orchestrates a `ScanWorker` (`QThread` + OpenCV + pyzbar) and a `RecordingSession` that owns **one** camera path: **OpenCV reads BGR frames** and pipes raw video into **FFmpeg** (`libx264`, `-an`) so the camera is not double-opened by FFmpeg dshow and OpenCV simultaneously (common Windows failure mode). Optional **keyboard-wedge** barcode path can be added later as a plugin; MVP follows spec camera decode. `windows_job.py` attaches FFmpeg PID to a Win32 Job Object so parent exit kills the child. Sounds: `FeedbackPlayer` uses `QSoundEffect` WAV triplets (short / double short / long) when scanner host API is absent (stub `ScannerHostBeep` no-op for MVP).
 
 **Tech Stack:** Python 3.11+, PySide6, OpenCV-Python, pyzbar (+ ZBar DLL on PATH or bundled), FFmpeg static CLI beside executable, pytest, pytest-qt (optional), `ctypes` for Job Object.
 
@@ -19,7 +19,7 @@
 | `src/packrecorder/__main__.py` | `main()` entry |
 | `src/packrecorder/app.py` | `QApplication`, Fusion style, load QSS, `MainWindow` |
 | `src/packrecorder/config.py` | `AppConfig` … **`packer_label`** default `"Máy 1"` |
-| `src/packrecorder/paths.py` | `sanitize_order_id`, `sanitize_packer_label` (spaces→`-`, same invalid rules), `build_output_path(..., packer_raw, ...)` → `{maDon}_{packer}_{stamp}.mp4` |
+| `src/packrecorder/paths.py` | `sanitize_*` chỉ đụng ký tự **cấm Windows** + `_`/space; **giữ Unicode** (UTF-8); `build_output_path(...)` |
 | `src/packrecorder/duplicate.py` | `is_duplicate_order(root: Path, order_id: str, today: date) -> bool` |
 | `src/packrecorder/retention.py` | `purge_old_day_folders(root: Path, keep_days: int, today: date) -> list[Path]` |
 | `src/packrecorder/order_state.py` | pure transitions + `TransitionResult` (start/stop/switch + flags for duplicate check, sounds) |
@@ -151,11 +151,18 @@ def test_sanitize_packer_spaces_underscore():
     assert sanitize_packer_label("A_B C") == "A-B-C"
 
 
+def test_sanitize_packer_preserves_utf8_letters():
+    assert sanitize_packer_label("Nguyễn Văn A") == "Nguyễn-Văn-A"
+    assert "đ" in sanitize_packer_label("Quầy-đông")
+
+
 def test_build_output_path_includes_packer():
     root = Path("D:/root")
     dt = datetime(2026, 4, 6, 14, 30, 0)
     p = build_output_path(root, "ORD001", "Máy 1", dt)
     assert p == Path("D:/root/2026-04-06/ORD001_Máy-1_20260406-143000.mp4")
+    p2 = build_output_path(root, "ORD001", "Nguyễn A", dt)
+    assert "Nguyễn-A" in p2.name
 ```
 
 - [ ] **Step 2: Run test — expect FAIL**
@@ -962,9 +969,23 @@ def test_save_load(tmp_path: Path):
     assert c2.video_root == c.video_root
     assert c2.camera_index == 0
     assert c2.packer_label == "Máy 2"
+
+
+def test_save_load_utf8_packer(tmp_path: Path):
+    p = tmp_path / "c.json"
+    c = AppConfig(
+        video_root=str(tmp_path / "v"),
+        camera_index=0,
+        packer_label="Nguyễn Văn A",
+    )
+    save_config(p, c)
+    raw = p.read_text(encoding="utf-8")
+    assert "Nguyễn" in raw
+    assert "\\u" not in raw
+    assert load_config(p).packer_label == "Nguyễn Văn A"
 ```
 
-- [ ] **Step 2: Implement `AppConfig` as dataclass** with fields: `video_root`, `camera_index`, **`packer_label: str = "Máy 1"`**, `shutdown_enabled`, `shutdown_time_hhmm` (default `"18:00"`), `sound_enabled`, `sound_mode` (`speaker`/`scanner_host`), `beep_short_ms`, `beep_gap_ms`, `beep_long_ms`, paths to optional WAVs.
+- [ ] **Step 2: Implement `AppConfig` as dataclass** with fields: `video_root`, `camera_index`, **`packer_label: str = "Máy 1"`**, `shutdown_enabled`, `shutdown_time_hhmm` (default `"18:00"`), `sound_enabled`, `sound_mode` (`speaker`/`scanner_host`), `beep_short_ms`, `beep_gap_ms`, `beep_long_ms`, paths to optional WAVs. **`save_config` / `load_config`:** dùng **`path.read_text(encoding="utf-8")`** và **`json.dumps(..., ensure_ascii=False)`** + **`write_text(..., encoding="utf-8")`** để **không** escape Unicode thành `\uXXXX`.
 
 Use `dataclasses.asdict` + `json.dump`.
 
