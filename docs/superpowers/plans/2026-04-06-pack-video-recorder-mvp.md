@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a Windows 64-bit desktop app (Python 3.11+, PySide6) that records one HD camera to dated folders, names files with **order id + packer label** (settings default/preset **Máy 1** / **Máy 2**), drives recording via scanned order codes (1D+QR from camera frames), enforces duplicate-order UI + long beep, retention (16 days), scheduled shutdown with 60s scan-to-cancel, FFmpeg child cleanup via Job Object, and speaker fallback beep patterns per spec `docs/superpowers/specs/2026-04-06-pack-video-recorder-design.md`.
+**Goal:** Ship a Windows 64-bit desktop app (Python 3.11+, PySide6) that records packaging video to dated folders, names files with **order id + packer label**, drives recording via scanned order codes (1D+QR), enforces duplicate-order UI + long beep, retention (16 days), scheduled shutdown with 60s scan-to-cancel, FFmpeg child cleanup via Job Object, and speaker fallback beep patterns per spec `docs/superpowers/specs/2026-04-06-pack-video-recorder-design.md`.
 
-**Architecture:** Pure-Python domain modules (`paths`, `order_state`, `duplicate`, `retention`, `shutdown_scheduler`) are tested with pytest. **All user-facing strings and JSON config use UTF-8** (`open(..., encoding="utf-8")`, `json.dump(..., ensure_ascii=False)`); `sanitize_packer_label` / `sanitize_order_id` **only** strip or replace **Windows-forbidden** filename characters—**Unicode letters (e.g. Vietnamese) stay** in `{packer}` and in filenames. UI (`PySide6`) orchestrates a `ScanWorker` (`QThread` + OpenCV + pyzbar) and a `RecordingSession` that owns **one** camera path: **OpenCV reads BGR frames** and pipes raw video into **FFmpeg** (`libx264`, `-an`) so the camera is not double-opened by FFmpeg dshow and OpenCV simultaneously (common Windows failure mode). Optional **keyboard-wedge** barcode path can be added later as a plugin; MVP follows spec camera decode. `windows_job.py` attaches FFmpeg PID to a Win32 Job Object so parent exit kills the child. Sounds: `FeedbackPlayer` uses `QSoundEffect` WAV triplets (short / double short / long) when scanner host API is absent (stub `ScannerHostBeep` no-op for MVP).
+**Phased delivery (same MVP umbrella):** **(A)** One camera + one `packer_label` (preset **Máy 1** / **Máy 2**) — ship first. **(B)** When **≥2 cameras**: **Option 1** — each camera + **one scanner binding** + **one name** per **station profile** (default **2** stations, **Add station**); camera picked **manually**; **scan-to-bind** (scan any valid code while app is in “assign scanner to station X” mode) attaches the current scan source to that profile without starting/stopping an order (spec §3.1). **(C)** **Option 2** — **PIP** composite from two cameras → **one** MP4, **one** `packer_label`, **one** scan pipeline. Options 1 and 2 are **mutually exclusive** runtime modes (user picks in settings). Implementation order: **A → B or C** as prioritized (recommend **A**, then **Option 1**, then **Option 2 PIP**).
+
+**Architecture:** Pure-Python domain modules (`paths`, `order_state`, `duplicate`, `retention`, `shutdown_scheduler`) are tested with pytest. **UTF-8** for strings and JSON as above. **Phase A:** one `ScanWorker` + one `RecordingSession` + one FFmpeg pipe (OpenCV capture → rawvideo stdin, **no** simultaneous FFmpeg `dshow` on the same device). **Phase B (Option 1):** `AppConfig.stations[]` (default length **2**, appendable); each station: `packer_label`, `record_camera_index`, `scan_source` (enum: e.g. `camera_same_as_record` | `camera_other_index` | `keyboard_wedge` — **finalize enum**); **one `OrderStateMachine` per station** (or shared idle UI with **active station** tab—**pick one** in Task B); **one FFmpeg child per station** that is recording; each FFmpeg PID → Job Object. **Scan-to-bind:** global or per-dialog flag `binding_station_id`; first decoded scan while flag set **does not** call `OrderStateMachine.on_scan`—only updates `scan_source` mapping; **unless** shutdown countdown is active—**then** §3.4 cancel still wins (spec). **Phase C (Option 2 PIP):** either **two** OpenCV captures feeding **one** compositor (CPU overlay) → single pipe, or **one** FFmpeg with two inputs + `filter_complex` (**choose** after Phase A stability)—still `-an`. Optional **keyboard-wedge** plugin remains valid for any phase. `ScannerHostBeep` stub for MVP.
 
 **Tech Stack:** Python 3.11+, PySide6, OpenCV-Python, pyzbar (+ ZBar DLL on PATH or bundled), FFmpeg static CLI beside executable, pytest, pytest-qt (optional), `ctypes` for Job Object.
 
@@ -18,7 +20,7 @@
 | `src/packrecorder/__init__.py` | version |
 | `src/packrecorder/__main__.py` | `main()` entry |
 | `src/packrecorder/app.py` | `QApplication`, Fusion style, load QSS, `MainWindow` |
-| `src/packrecorder/config.py` | `AppConfig` … **`packer_label`** default `"Máy 1"` |
+| `src/packrecorder/config.py` | `AppConfig`: Phase A — `packer_label`, `camera_index`. Phase B+ — `multi_camera_mode`: `single` \| `stations` \| `pip`; `stations: list[StationConfig]` (default **2** rows: **Máy 1** / **Máy 2**, **add**); PIP fields (`pip_main_index`, `pip_sub_index`, `packer_label`, scan source). Schema version key for migration. |
 | `src/packrecorder/paths.py` | `sanitize_*` chỉ đụng ký tự **cấm Windows** + `_`/space; **giữ Unicode** (UTF-8); `build_output_path(...)` |
 | `src/packrecorder/duplicate.py` | `is_duplicate_order(root: Path, order_id: str, today: date) -> bool` |
 | `src/packrecorder/retention.py` | `purge_old_day_folders(root: Path, keep_days: int, today: date) -> list[Path]` |
@@ -30,7 +32,7 @@
 | `src/packrecorder/feedback_sound.py` | `FeedbackPlayer` short / double / long |
 | `src/packrecorder/scanner_host_beep.py` | `ScannerHostBeep` ABC + `NullScannerHostBeep` |
 | `src/packrecorder/ui/main_window.py` | status chips, status bar messages, wire state machine |
-| `src/packrecorder/ui/settings_dialog.py` | root path, camera index, **packer combo** (preset **Máy 1**, **Máy 2**, editable), times, toggles |
+| `src/packrecorder/ui/settings_dialog.py` | root path; Phase A — camera index, packer combo. Phase B — **Option 1 / Option 2** radio; Option 1 — **per-station** rows: camera (manual), scanner source, **scan-to-bind** button, packer name, **Add station**; Option 2 — PIP main/sub cameras, single packer, scan source. Times, toggles. |
 | `src/packrecorder/ui/countdown_dialog.py` | 60s, scan cancel, `scan_cancelled` signal |
 | `src/packrecorder/ui/styles.qss` | Material-like light theme |
 | `resources/sounds/README.txt` | instruct to add WAV or use generated |
@@ -41,13 +43,23 @@
 | `tests/test_shutdown_scheduler.py` | |
 | `tests/test_ffmpeg_pipe_recorder.py` | mock `subprocess.Popen` |
 
-**Giai đoạn 2** (PIP hai nguồn): tách plan sau — không nằm trong file này.
+**Tuỳ chọn 1 / 2 (hai camera, spec §2 §3.1 §6):** triển khai trong **cùng** plan này sau Phase A; thêm **Task B** (stations + scan-to-bind + dual `RecordingSession` / dual state machine) và **Task C** (PIP single output) — **mục tiêu chi tiết** bổ sung khi bắt đầu từng task (hoặc tách subsection dưới đây thành checklist riêng khi implement).
+
+### Hai camera trên một PC — checklist thiết kế (MVP)
+
+| Hạng mục | Tuỳ chọn 1 (mỗi camera = 1 tên = 1 máy quét) | Tuỳ chọn 2 (PIP = 1 tên = 1 máy quét) |
+|----------|-----------------------------------------------|----------------------------------------|
+| File đầu ra | Mỗi quầy: MP4 riêng, `{packer}` theo profile | Một MP4 ghép PIP |
+| Cài đặt | Camera (tay) + nguồn quét + nhãn từng dòng; mặc định 2 dòng, **Thêm** | Hai camera PIP + một nhãn + một nguồn quét |
+| Scan-to-bind | Có (gán súng/wedge/camera decode cho quầy) | Không bắt buộc (một pipeline) |
+| FFmpeg | Một process / quầy đang ghi | Một process, hai input hoặc một pipe sau overlay CPU |
+| Job Object | Gắn mọi PID FFmpeg con | Một PID (hoặc nhiều nếu tách encode — tránh nếu không cần) |
 
 ### Lưu ý triển khai / debug camera (bắt buộc đọc — spec §9.1–§9.4)
 
 - **Resource leak:** Dừng debugger / crash trước `VideoCapture.release()` khiến Windows **giữ lock** → lần sau "mất camera". Mọi đường mở capture phải **`try`/`finally`** hoặc class có `close()` gọi từ **`atexit`** và khi đóng app.
 - **Chữa nhanh:** Task Manager kill `python.exe` / app; USB **rút cắm lại**; Device Manager **Disable/Enable** camera tích hợp — ghi vào **`README.md`** mục Troubleshooting.
-- **Hai webcam (giai đoạn 2 hoặc test):** tránh hai cổng chung hub; xem **§9.4** băng thông USB.
+- **Hai webcam (tuỳ chọn 1 / 2 hoặc test):** tránh hai cổng chung hub; xem **§9.4** băng thông USB; Option 1 song song hai capture + hai encode = CPU/USB cao hơn.
 
 ---
 
@@ -1160,7 +1172,7 @@ git commit -m "build: pyinstaller spec and operator readme"
 
 | Spec section | Task(s) |
 |--------------|---------|
-| §1 MVP one camera, no audio in MP4 | Task 8 `-an`, OpenCV single capture |
+| §1 §2 §6 MVP layers: one camera; Option 1 stations; Option 2 PIP | Task 8 `-an`, OpenCV; **Task B/C** (add when implementing §3.1 multi-mode) |
 | §3.2 state table | Task 5 + 12 |
 | §3.3 debounce | Task 10 |
 | §3.4 shutdown scan priority | Task 12 flag `is_shutdown_countdown` + 13 |
@@ -1169,7 +1181,8 @@ git commit -m "build: pyinstaller spec and operator readme"
 | §4 paths / retention / **packer trong tên file** | Task 2 (`sanitize_packer_label`), 3 (glob `maDon_` vẫn khớp), 9, 12, 14 |
 | §8 shutdown flow | Task 6, 13 |
 | §9 Job Object, shutdown cleanup, **§9.1–9.4 camera lock / USB** | Task 7, 8, 13, 12 `atexit` + **README Troubleshooting**; `ScanWorker` / capture **`finally` release** |
-| §12 Phase 2 PIP | Out of scope — separate plan |
+| §3.1 scan-to-bind, station list | Task B (settings + decode router + priority vs §3.4) |
+| §12 | Phase-after-MVP polish — not PIP (PIP is MVP Option 2) |
 
 **2. Placeholder scan:** No `TBD` in executable steps; WAV files documented via README; scanner host beep explicitly `NullScannerHostBeep` until model known.
 
