@@ -93,6 +93,10 @@ class SettingsDialog(QDialog):
 
         self._shutdown_on = QCheckBox("Tắt máy hẹn giờ")
         self._shutdown_on.setChecked(cfg.shutdown_enabled)
+        self._shutdown_on.setToolTip(
+            "Đến giờ hẹn, hộp đếm ngược chỉ hiện nếu 20 phút liền không có thao tác "
+            "(chuột, bàn phím, quét mã, nhập mã…)."
+        )
         self._shutdown_time = QLineEdit(cfg.shutdown_time_hhmm)
 
         self._sound_on = QCheckBox("Âm báo")

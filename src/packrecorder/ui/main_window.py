@@ -14,6 +14,7 @@ from PySide6.QtGui import (
     QDesktopServices,
     QIcon,
     QImage,
+    QKeyEvent,
     QPainter,
     QPen,
     QColor,
@@ -22,6 +23,7 @@ from PySide6.QtGui import (
     QShowEvent,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QLabel,
     QMainWindow,
@@ -102,6 +104,8 @@ _REC_ELAPSED_BAR_STYLE = (
 # Nhập tay + Enter: không debounce — mỗi Enter luôn gửi nội dung ô hiện tại.
 _SERIAL_SAME_CODE_DEBOUNCE_S = 0.45
 _DEFAULT_RECORDING_FPS = 30
+# Sau giờ hẹn tắt máy: chỉ mở hộp đếm ngược nếu không có thao tác (chuột/bàn phím/quét…) trong khoảng này.
+_SHUTDOWN_COUNTDOWN_IDLE_S = 20 * 60
 
 
 def _pin_icon() -> QIcon:
@@ -153,6 +157,7 @@ class MainWindow(QMainWindow):
         self._feedback = FeedbackPlayer(self._config)
         self._shutdown_countdown = False
         self._countdown_dialog: Optional[ShutdownCountdownDialog] = None
+        self._last_user_activity_mono = time.monotonic()
 
         self._workers: dict[int, ScanWorker] = {}
         self._mp_pipelines: dict[int, MpCameraPipeline] = {}
@@ -280,12 +285,35 @@ class MainWindow(QMainWindow):
         self._shutdown_timer.timeout.connect(self._check_shutdown)
         self._shutdown_timer.start(15_000)
 
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: ANN001
+        et = event.type()
+        if et in (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonDblClick,
+            QEvent.Type.Wheel,
+            QEvent.Type.TouchBegin,
+        ):
+            self._note_user_activity()
+        elif et == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
+            if not event.isAutoRepeat():
+                self._note_user_activity()
+        return super().eventFilter(watched, event)
+
+    def _note_user_activity(self) -> None:
+        """Đánh dấu người dùng vừa tương tác (để hẹn tắt máy chờ idle)."""
+        self._last_user_activity_mono = time.monotonic()
+
     def _apply_always_on_top(self, on: bool) -> None:
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
         self.show()
         self.raise_()
 
     def _on_always_on_top_toggled(self, checked: bool) -> None:
+        self._note_user_activity()
         self._apply_always_on_top(checked)
         if checked == self._config.window_always_on_top:
             return
@@ -318,6 +346,7 @@ class MainWindow(QMainWindow):
         self._record_resolution_combo.blockSignals(False)
 
     def _on_record_resolution_combo_changed(self) -> None:
+        self._note_user_activity()
         data = self._record_resolution_combo.currentData()
         rr = normalize_record_resolution_preset(
             data if isinstance(data, str) else "native"
@@ -390,6 +419,7 @@ class MainWindow(QMainWindow):
         self._dual_panel.set_refresh_busy(False)
 
     def _on_dual_refresh_devices(self) -> None:
+        self._note_user_activity()
         if self._config.multi_camera_mode != "stations":
             return
         if self._camera_probe_busy:
@@ -416,6 +446,7 @@ class MainWindow(QMainWindow):
             self._dual_panel.apply_camera_probe_result(found)
 
     def _on_dual_fields_changed(self) -> None:
+        self._note_user_activity()
         if self._config.multi_camera_mode != "stations":
             return
         if self._dual_panel.duplicate_scanner_ports():
@@ -453,6 +484,7 @@ class MainWindow(QMainWindow):
         self._restart_scan_workers()
 
     def _on_rtsp_connect_requested(self, col: int, url: str) -> None:
+        self._note_user_activity()
         if self._config.multi_camera_mode != "stations":
             return
         u = (url or "").strip()
@@ -580,6 +612,7 @@ class MainWindow(QMainWindow):
             self._dual_panel.set_preview_column(col, bgr, w, h)
 
     def _on_serial_decoded(self, station_id: str, text: str) -> None:
+        self._note_user_activity()
         if self._shutdown_countdown and self._countdown_dialog is not None:
             return
         text = normalize_manual_order_text(text)
@@ -720,11 +753,15 @@ class MainWindow(QMainWindow):
             return
         if datetime.now() < self._next_shutdown_at:
             return
+        idle_s = time.monotonic() - self._last_user_activity_mono
+        if idle_s < _SHUTDOWN_COUNTDOWN_IDLE_S:
+            return
         self._begin_shutdown_sequence()
 
     def _begin_shutdown_sequence(self) -> None:
         mark_session_phase(
-            "Hẹn giờ tắt máy: đã mở đếm ngược 60s — hủy bằng nút hoặc quét mã; "
+            "Hẹn giờ tắt máy: đã mở đếm ngược 60s (chỉ sau khi qua giờ hẹn và không có thao tác "
+            f"{_SHUTDOWN_COUNTDOWN_IDLE_S // 60} phút) — hủy bằng nút hoặc quét mã; "
             "hết giờ sẽ tắt Windows (không chỉ thoát app). Tắt tính năng: Tệp → Cài đặt."
         )
         self._stop_all_recording_for_shutdown()
@@ -1296,6 +1333,7 @@ class MainWindow(QMainWindow):
             w.set_recording(cam in active_record_cams)
 
     def _on_decoded(self, cam_idx: int, code: str) -> None:
+        self._note_user_activity()
         if self._shutdown_countdown and self._countdown_dialog is not None:
             self._countdown_dialog.on_barcode_during_countdown()
             return
@@ -1323,6 +1361,7 @@ class MainWindow(QMainWindow):
         self._handle_decode_station(st.station_id, code)
 
     def _on_manual_order_submitted(self, col: int, text: str) -> None:
+        self._note_user_activity()
         if self._shutdown_countdown and self._countdown_dialog is not None:
             return
         if self._config.multi_camera_mode != "stations":
@@ -1651,6 +1690,7 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl("https://www.gyan.dev/ffmpeg/builds/"))
 
     def _open_error_log_folder(self) -> None:
+        self._note_user_activity()
         p = session_log_path().resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
         url = QUrl.fromLocalFile(str(p.parent))
@@ -1662,6 +1702,7 @@ class MainWindow(QMainWindow):
             )
 
     def _open_settings(self) -> None:
+        self._note_user_activity()
         if any(r is not None for r in self._recorders.values()):
             QMessageBox.warning(
                 self,
@@ -1731,6 +1772,12 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.removeEventFilter(self)
+            except Exception:
+                pass
         mark_session_phase(
             "MainWindow.closeEvent — cửa sổ chính đóng (thường: bấm X / Alt+F4; "
             "hoặc môi trường chạy kết thúc tiến trình; không phải lỗi nếu bạn chủ động thoát)."
