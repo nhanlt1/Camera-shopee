@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from packrecorder.config import (
+    STATION_RTSP_LOGICAL_ID_BASE,
     AppConfig,
     StationConfig,
     ensure_distinct_station_record_cameras,
@@ -10,8 +11,22 @@ from packrecorder.config import (
     normalize_config,
     save_config,
     station_for_decode_camera,
+    station_record_cam_id,
     stations_non_serial_decode_collision,
 )
+
+
+def test_default_record_resolution_and_encoding():
+    c = AppConfig()
+    c = normalize_config(c)
+    assert c.use_multiprocessing_camera_pipeline is False
+    assert c.record_resolution == "hd"
+    assert c.record_fps == 30
+    assert c.record_video_codec == "h264"
+    assert c.record_h264_crf == 26
+    assert c.record_video_bitrate_kbps == 3000
+    assert c.barcode_scan_interval_frames == 15
+    assert c.barcode_scan_scale == 0.5
 
 
 def test_save_load(tmp_path: Path):
@@ -26,6 +41,41 @@ def test_save_load(tmp_path: Path):
     assert c2.video_root == c.video_root
     assert c2.camera_index == 0
     assert c2.packer_label == "Máy 2"
+
+
+def test_record_roi_norm_roundtrip(tmp_path: Path):
+    p = tmp_path / "c.json"
+    roi = (0.1, 0.2, 0.5, 0.45)
+    st = [
+        StationConfig("a1", "Máy A", 0, 0, record_roi_norm=roi),
+        StationConfig("b2", "Máy B", 1, 1, record_roi_norm=None),
+    ]
+    c = AppConfig(multi_camera_mode="stations", stations=st)
+    save_config(p, c)
+    c2 = load_config(p)
+    assert c2.stations[0].record_roi_norm is not None
+    assert len(c2.stations[0].record_roi_norm) == 4
+    assert abs(c2.stations[0].record_roi_norm[0] - 0.1) < 1e-6
+    assert c2.stations[1].record_roi_norm is None
+
+
+def test_station_preview_display_roundtrip(tmp_path: Path):
+    p = tmp_path / "c.json"
+    st = [
+        StationConfig(
+            "a1",
+            "Máy A",
+            0,
+            1,
+            preview_display_index=2,
+        ),
+        StationConfig("b2", "Máy B", 1, 0, preview_display_index=-1),
+    ]
+    c = AppConfig(multi_camera_mode="stations", stations=st)
+    save_config(p, c)
+    c2 = load_config(p)
+    assert c2.stations[0].preview_display_index == 2
+    assert c2.stations[1].preview_display_index == -1
 
 
 def test_save_load_stations_and_mode(tmp_path: Path):
@@ -145,6 +195,73 @@ def test_normalize_decode_not_peer_record():
     )
     normalize_config(c)
     assert c.stations[1].decode_camera_index == 1
+
+
+def test_station_record_cam_id_rtsp_usb():
+    u = StationConfig("a", "M1", 0, 0)
+    r = StationConfig(
+        "b",
+        "M2",
+        0,
+        0,
+        record_camera_kind="rtsp",
+        record_rtsp_url="rtsp://x",
+    )
+    assert station_record_cam_id(u, 0) == 0
+    assert station_record_cam_id(r, 1) == STATION_RTSP_LOGICAL_ID_BASE + 1
+
+
+def test_rtsp_station_roundtrip(tmp_path: Path):
+    p = tmp_path / "c.json"
+    url = "rtsp://admin:pw@192.168.1.10:554/cam/realmonitor?channel=1&subtype=1"
+    st = [
+        StationConfig(
+            "a1",
+            "Máy A",
+            0,
+            0,
+            record_camera_kind="rtsp",
+            record_rtsp_url=url,
+        ),
+        StationConfig("b2", "Máy B", 1, 1),
+    ]
+    c = AppConfig(multi_camera_mode="stations", stations=st)
+    save_config(p, c)
+    c2 = load_config(p)
+    assert c2.stations[0].record_camera_kind == "rtsp"
+    assert url in (c2.stations[0].record_rtsp_url or "")
+    assert c2.stations[0].record_camera_index == STATION_RTSP_LOGICAL_ID_BASE
+    assert c2.stations[0].decode_camera_index == STATION_RTSP_LOGICAL_ID_BASE
+
+
+def test_load_config_manual_json_rtsp(tmp_path: Path):
+    """Sửa tay config.json (ngoài UI) phải đọc lại đúng kind + URL."""
+    p = tmp_path / "manual.json"
+    url = "rtsp://admin:secret@10.0.0.5:554/stream"
+    raw = {
+        "schema_version": 5,
+        "multi_camera_mode": "stations",
+        "stations": [
+            {
+                "station_id": "s0",
+                "packer_label": "Ban 1",
+                "record_camera_index": 0,
+                "decode_camera_index": 0,
+                "record_camera_kind": "rtsp",
+                "record_rtsp_url": url,
+            },
+            {
+                "station_id": "s1",
+                "packer_label": "Ban 2",
+                "record_camera_index": 1,
+                "decode_camera_index": 1,
+            },
+        ],
+    }
+    p.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    c = load_config(p)
+    assert c.stations[0].record_camera_kind == "rtsp"
+    assert c.stations[0].record_rtsp_url == url
 
 
 def test_save_load_utf8_packer(tmp_path: Path):

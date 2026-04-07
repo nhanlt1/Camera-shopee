@@ -6,7 +6,12 @@ Hoặc: scripts\\build_portable.bat
 """
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs
+import numpy as _np
+from PyInstaller.utils.hooks import (
+    collect_all,
+    collect_delvewheel_libs_directory,
+    collect_dynamic_libs,
+)
 
 project_root = Path(SPECPATH)
 src = project_root / "src"
@@ -14,8 +19,12 @@ src = project_root / "src"
 block_cipher = None
 
 ps_datas, ps_binaries, ps_hiddenimports = collect_all("PySide6")
+sh_datas, sh_binaries, sh_hiddenimports = collect_all("shiboken6")
 
-datas = [
+datas = list(ps_datas) + list(sh_datas)
+binaries = list(ps_binaries) + list(sh_binaries)
+hiddenimports = list(ps_hiddenimports) + list(sh_hiddenimports)
+extra_datas = [
     (
         str(src / "packrecorder" / "ui" / "styles.qss"),
         "packrecorder/ui",
@@ -24,7 +33,7 @@ datas = [
 _ffmpeg_dir = project_root / "resources" / "ffmpeg"
 ffmpeg_exe = _ffmpeg_dir / "ffmpeg.exe"
 if ffmpeg_exe.is_file():
-    datas.append((str(ffmpeg_exe), "."))
+    extra_datas.append((str(ffmpeg_exe), "."))
 else:
     _picked = None
     if _ffmpeg_dir.is_dir():
@@ -35,31 +44,45 @@ else:
                     _picked = _cand
                     break
     if _picked is not None:
-        datas.append((str(_picked), "."))
+        extra_datas.append((str(_picked), "."))
 
-binaries = list(ps_binaries)
+_np_exceptions = Path(_np.__file__).resolve().parent / "_core" / "_exceptions.py"
+if _np_exceptions.is_file():
+    extra_datas.append((str(_np_exceptions), "numpy/_core"))
+
 for pkg in ("pyzbar", "cv2"):
     try:
         binaries += collect_dynamic_libs(pkg)
     except Exception:
         pass
 
-hiddenimports = list(ps_hiddenimports) + [
+datas, binaries = collect_delvewheel_libs_directory(
+    "numpy", datas=datas, binaries=binaries
+)
+
+hiddenimports += [
     "PySide6.QtMultimedia",
     "numpy",
+    "numpy._core._exceptions",
     "PIL",
     "PIL._imaging",
     "PIL.Image",
     "pyzbar",
     "pyzbar.pyzbar",
     "serial",
+    "packrecorder.barcode_decode",
+    "packrecorder.ipc",
+    "packrecorder.ipc.capture_worker",
+    "packrecorder.ipc.scanner_worker",
+    "packrecorder.ipc.pipeline",
+    "packrecorder.ipc.frame_ring",
 ]
 
 a = Analysis(
     [str(src / "packrecorder" / "__main__.py")],
     pathex=[str(src)],
     binaries=binaries,
-    datas=datas + ps_datas,
+    datas=extra_datas + datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

@@ -1,19 +1,34 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from datetime import date, datetime, time as time_cls
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QShowEvent
+from PySide6.QtCore import QEvent, QPointF, Qt, QTimer, QUrl
+from PySide6.QtGui import (
+    QAction,
+    QBrush,
+    QDesktopServices,
+    QIcon,
+    QImage,
+    QPainter,
+    QPen,
+    QColor,
+    QPixmap,
+    QPolygonF,
+    QShowEvent,
+)
 from PySide6.QtWidgets import (
+    QComboBox,
     QLabel,
     QMainWindow,
     QMessageBox,
     QStackedWidget,
     QStatusBar,
+    QToolBar,
 )
 
 from packrecorder.config import (
@@ -26,22 +41,29 @@ from packrecorder.config import (
     normalize_config,
     save_config,
     station_for_decode_camera,
+    station_record_cam_id,
     station_uses_serial_scanner,
 )
-from packrecorder.duplicate import is_duplicate_order
 from packrecorder.ffmpeg_locate import resolve_ffmpeg as _resolve_ffmpeg
 from packrecorder.ffmpeg_pipe_recorder import FFmpegPipeRecorder
 from packrecorder.feedback_sound import FeedbackPlayer
 from packrecorder.order_input import normalize_manual_order_text
 from packrecorder.order_state import OrderStateMachine, ScanResult
 from packrecorder.paths import build_output_path
+from packrecorder.record_roi import norm_to_pixels
+from packrecorder.record_resolution import (
+    PRESET_LABELS_VI,
+    PRESET_ORDER,
+    normalize_record_resolution_preset,
+    target_dimensions_for_preset,
+)
 from packrecorder.pip_composite import composite_pip_bgr
 from packrecorder.retention import purge_old_day_folders
 from packrecorder.session_log import log_session_error, mark_session_phase, session_log_path
+from packrecorder.ipc.pipeline import MpCameraPipeline
 from packrecorder.scan_worker import ScanWorker
 from packrecorder.serial_scan_worker import SerialScanWorker
 from packrecorder.shutdown_scheduler import compute_next_shutdown_at
-from packrecorder.ui.camera_preview import bgr_bytes_to_pixmap
 from packrecorder.ui.countdown_dialog import ShutdownCountdownDialog
 from packrecorder.ui.dual_station_widget import DualStationWidget
 from packrecorder.ui.settings_dialog import SettingsDialog
@@ -49,6 +71,7 @@ from packrecorder.video_overlay import (
     RecordingBurnIn,
     burn_in_recording_info_bgr,
     format_elapsed_overlay,
+    render_recording_overlay_chip_rgba,
 )
 
 
@@ -73,8 +96,27 @@ _REC_ELAPSED_BAR_STYLE = (
     "font-size:16px;font-weight:bold;font-family:Consolas,'Cascadia Mono',monospace;"
     "border:2px solid #c62828;"
 )
-_MANUAL_ORDER_DEBOUNCE_S = 0.45
+# Chỉ dùng cho máy quét COM: chặn hai lần gửi cùng mã quá sát (lần 2 = lặp kỹ thuật).
+# Nhập tay + Enter: không debounce — mỗi Enter luôn gửi nội dung ô hiện tại.
+_SERIAL_SAME_CODE_DEBOUNCE_S = 0.45
 _DEFAULT_RECORDING_FPS = 30
+
+
+def _pin_icon() -> QIcon:
+    """Icon ghim nhỏ cho nút «Luôn trên cùng»."""
+    s = 22
+    pix = QPixmap(s, s)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(QColor(13, 71, 161), 1.2))
+    p.setBrush(QBrush(QColor(100, 181, 246)))
+    p.drawEllipse(5.0, 3.5, 12.0, 12.0)
+    p.setBrush(QBrush(QColor(25, 118, 210)))
+    tri = QPolygonF([QPointF(7.5, 15.5), QPointF(14.5, 15.5), QPointF(11.0, s - 1.0)])
+    p.drawPolygon(tri)
+    p.end()
+    return QIcon(pix)
 
 
 def _format_recording_elapsed(since: datetime) -> str:
@@ -92,12 +134,17 @@ def _ms_until_next_wall_second() -> int:
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self._did_startup_focus = False
         self.setWindowTitle("Pack Recorder")
         self._config_path = default_config_path()
         self._config = load_config(self._config_path)
         ensure_dual_stations(self._config)
         self._config = normalize_config(self._config)
         save_config(self._config_path, self._config)
+        self.setWindowFlag(
+            Qt.WindowType.WindowStaysOnTopHint,
+            self._config.window_always_on_top,
+        )
         self._next_shutdown_at: Optional[datetime] = None
         self._next_shutdown_ref: list[Optional[datetime]] = [None]
         self._refresh_next_shutdown()
@@ -106,8 +153,10 @@ class MainWindow(QMainWindow):
         self._countdown_dialog: Optional[ShutdownCountdownDialog] = None
 
         self._workers: dict[int, ScanWorker] = {}
+        self._mp_pipelines: dict[int, MpCameraPipeline] = {}
+        self._mp_preview_last_mono: dict[int, float] = {}
         self._serial_workers: dict[str, SerialScanWorker] = {}
-        self._preview_route: dict[int, int] = {}
+        self._preview_targets: dict[int, list[int]] = {}
         self._pip_wh: dict[int, tuple[int, int]] = {}
         self._camera_fps: dict[int, int] = {}
         self._pip_last_frame: dict[int, bytes] = {}
@@ -116,8 +165,11 @@ class MainWindow(QMainWindow):
             480,
             _DEFAULT_RECORDING_FPS,
         )
-        self._manual_submit_debounce: dict[int, tuple[str, float]] = {}
         self._serial_submit_debounce: dict[str, tuple[str, float]] = {}
+        self._debug_preview_logs_left = 3  # agent log: throttle _on_worker_preview
+        self._restart_in_progress = False
+        self._restart_pending = False
+        self._rtsp_error_shown: set[int] = set()
 
         self._order_sm: dict[str, OrderStateMachine] = {}
         self._recorders: dict[str, FFmpegPipeRecorder | None] = {}
@@ -133,6 +185,9 @@ class MainWindow(QMainWindow):
         self._record_pace_timer = QTimer(self)
         self._record_pace_timer.setInterval(10)
         self._record_pace_timer.timeout.connect(self._recording_emit_tick)
+        self._mp_service_timer = QTimer(self)
+        self._mp_service_timer.setInterval(15)
+        self._mp_service_timer.timeout.connect(self._mp_service_tick)
         self._latest_record_bgr: dict[str, bytes] = {}
         self._recording_next_emit_mono: dict[str, float] = {}
         self._recording_emit_fps: dict[str, int] = {}
@@ -152,6 +207,7 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
         self._dual_panel = DualStationWidget()
         self._dual_panel.fields_changed.connect(self._on_dual_fields_changed)
+        self._dual_panel.rtsp_connect_requested.connect(self._on_rtsp_connect_requested)
         self._dual_panel.refresh_devices_requested.connect(self._on_dual_refresh_devices)
         self._dual_panel.manual_order_submitted.connect(self._on_manual_order_submitted)
         self._mode_hint = QLabel(
@@ -166,6 +222,35 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._stack)
         self.setMinimumSize(920, 560)
         self.resize(1040, 640)
+
+        res_bar = QToolBar("Độ phân giải ghi", self)
+        res_bar.setMovable(False)
+        res_bar.addWidget(QLabel("Độ phân giải ghi: "))
+        self._record_resolution_combo = QComboBox()
+        self._record_resolution_combo.setMinimumWidth(300)
+        for p in PRESET_ORDER:
+            self._record_resolution_combo.addItem(PRESET_LABELS_VI[p], p)
+        self._sync_record_resolution_combo_from_config()
+        self._record_resolution_combo.currentIndexChanged.connect(
+            self._on_record_resolution_combo_changed
+        )
+        res_bar.addWidget(self._record_resolution_combo)
+        self.addToolBar(res_bar)
+
+        pin_bar = QToolBar("Cửa sổ", self)
+        pin_bar.setMovable(False)
+        self._act_always_top = QAction(_pin_icon(), "Luôn trên cùng", self)
+        self._act_always_top.setCheckable(True)
+        self._act_always_top.setChecked(self._config.window_always_on_top)
+        self._act_always_top.setToolTip(
+            "Ghim cửa sổ luôn nổi trên app khác.\n"
+            "• Máy quét COM: không cần ghim vẫn nhận mã.\n"
+            "• Máy quét kiểu bàn phím: ghim + tiêu điểm ở ô «Mã đơn» giúp ký tự vào đúng app "
+            "(triệt để hơn: chỉ dùng COM/serial hoặc đọc mã bằng camera trong app)."
+        )
+        self._act_always_top.toggled.connect(self._on_always_on_top_toggled)
+        pin_bar.addAction(self._act_always_top)
+        self.addToolBar(pin_bar)
 
         self._rebuild_order_machines()
         self._update_packer_message()
@@ -190,6 +275,64 @@ class MainWindow(QMainWindow):
         self._shutdown_timer = QTimer(self)
         self._shutdown_timer.timeout.connect(self._check_shutdown)
         self._shutdown_timer.start(15_000)
+
+    def _apply_always_on_top(self, on: bool) -> None:
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
+        self.show()
+        self.raise_()
+
+    def _on_always_on_top_toggled(self, checked: bool) -> None:
+        self._apply_always_on_top(checked)
+        if checked == self._config.window_always_on_top:
+            return
+        self._config = replace(self._config, window_always_on_top=checked)
+        save_config(self._config_path, self._config)
+
+    def _sync_always_on_top_from_config(self) -> None:
+        on = self._config.window_always_on_top
+        self._act_always_top.blockSignals(True)
+        self._act_always_top.setChecked(on)
+        self._act_always_top.blockSignals(False)
+        self._apply_always_on_top(on)
+
+    def _focus_for_scanner_wedge(self) -> None:
+        if self._config.multi_camera_mode != "stations":
+            return
+        if self._stack.currentWidget() is not self._dual_panel:
+            return
+        self.activateWindow()
+        self.raise_()
+        self._dual_panel.focus_default_order_input()
+
+    def _sync_record_resolution_combo_from_config(self) -> None:
+        rr = normalize_record_resolution_preset(self._config.record_resolution)
+        ix = self._record_resolution_combo.findData(rr)
+        if ix < 0:
+            ix = self._record_resolution_combo.findData("native")
+        self._record_resolution_combo.blockSignals(True)
+        self._record_resolution_combo.setCurrentIndex(max(0, ix))
+        self._record_resolution_combo.blockSignals(False)
+
+    def _on_record_resolution_combo_changed(self) -> None:
+        data = self._record_resolution_combo.currentData()
+        rr = normalize_record_resolution_preset(
+            data if isinstance(data, str) else "native"
+        )
+        if rr == normalize_record_resolution_preset(self._config.record_resolution):
+            return
+        if any(r is not None for r in self._recorders.values()):
+            self._sync_record_resolution_combo_from_config()
+            QMessageBox.warning(
+                self,
+                "Đang ghi hình",
+                "Không đổi độ phân giải khi đang ghi. Dừng ghi trước.",
+            )
+            return
+        self._pause_scan_workers()
+        self._config = replace(self._config, record_resolution=rr)
+        self._config = normalize_config(self._config)
+        save_config(self._config_path, self._config)
+        self._restart_scan_workers()
 
     def _update_central_page(self) -> None:
         if self._config.multi_camera_mode == "stations":
@@ -305,23 +448,132 @@ class MainWindow(QMainWindow):
         self._update_packer_message()
         self._restart_scan_workers()
 
-    def _on_worker_preview(self, cam_idx: int, bgr: bytes) -> None:
+    def _on_rtsp_connect_requested(self, col: int, url: str) -> None:
         if self._config.multi_camera_mode != "stations":
             return
-        col = self._preview_route.get(cam_idx)
-        if col is None:
+        u = (url or "").strip()
+        if not u.lower().startswith("rtsp://"):
+            QMessageBox.warning(
+                self,
+                "URL RTSP không hợp lệ",
+                "URL phải bắt đầu bằng rtsp://",
+            )
+            return
+        # region agent log
+        try:
+            from packrecorder.debug_ndjson import dbg
+
+            dbg(
+                "H7",
+                "main_window._on_rtsp_connect_requested",
+                "user_requested_rtsp_connect",
+                col=col,
+                url_len=len(u),
+            )
+        except Exception:
+            pass
+        # endregion agent log
+        self._on_dual_fields_changed()
+
+    def _mp_service_tick(self) -> None:
+        if not self._mp_pipelines:
+            return
+        for _cam, pl in list(self._mp_pipelines.items()):
+            for msg in pl.pump_events():
+                if not msg:
+                    continue
+                kind = msg[0]
+                if kind == "capture_failed":
+                    self._on_worker_capture_failed(int(msg[1]), str(msg[2]))
+                elif kind == "ready":
+                    self._on_camera_opened_slot(
+                        int(msg[1]), int(msg[3]), int(msg[4]), int(msg[5])
+                    )
+            for cam_i, text in pl.pump_decodes():
+                self._on_decoded(cam_i, text)
+        self._refresh_mp_recording_and_preview()
+
+    def _refresh_mp_recording_and_preview(self) -> None:
+        """Cập nhật preview / buffer ghi từ SharedMemory (không qua Signal)."""
+        preview_dt = 1.0 / 30.0
+        now = time.monotonic()
+        if self._config.multi_camera_mode == "stations":
+            for cam_idx, cols in self._preview_targets.items():
+                if not cols:
+                    continue
+                pl = self._mp_pipelines.get(cam_idx)
+                if pl is None or not pl.is_ready:
+                    continue
+                last = self._mp_preview_last_mono.get(cam_idx, 0.0)
+                if now - last < preview_dt:
+                    continue
+                bgr = pl.copy_latest_full_bgr_bytes()
+                if bgr:
+                    self._mp_preview_last_mono[cam_idx] = now
+                    self._on_worker_preview(cam_idx, bgr)
+        if self._config.multi_camera_mode == "pip":
+            rec = self._recorders.get("pip")
+            if rec:
+                for cam in (
+                    self._config.pip_main_camera_index,
+                    self._config.pip_sub_camera_index,
+                ):
+                    pl = self._mp_pipelines.get(cam)
+                    if pl is None or not pl.is_ready:
+                        continue
+                    bgr = pl.copy_latest_full_bgr_bytes()
+                    if bgr:
+                        self._pip_last_frame[cam] = bgr
+        elif self._config.multi_camera_mode == "single":
+            cam = self._config.camera_index
+            pl = self._mp_pipelines.get(cam)
+            if pl is not None and pl.is_ready and self._recorders.get("single"):
+                roi = None
+                bgr = pl.copy_latest_roi_bgr_bytes(roi)
+                if bgr:
+                    self._latest_record_bgr["single"] = bgr
+        else:
+            for i, st in enumerate(self._config.stations):
+                sid = st.station_id
+                if not self._recorders.get(sid):
+                    continue
+                cam = station_record_cam_id(st, i)
+                pl = self._mp_pipelines.get(cam)
+                if pl is None or not pl.is_ready:
+                    continue
+                roi = st.record_roi_norm
+                bgr = pl.copy_latest_roi_bgr_bytes(roi)
+                if bgr:
+                    self._latest_record_bgr[sid] = bgr
+
+    def _on_worker_preview(self, cam_idx: int, bgr: bytes) -> None:
+        # region agent log
+        if self._debug_preview_logs_left > 0:
+            self._debug_preview_logs_left -= 1
+            try:
+                from packrecorder.debug_ndjson import dbg
+
+                dbg(
+                    "H4",
+                    "main_window._on_worker_preview",
+                    "enter",
+                    cam_idx=cam_idx,
+                    bgr_len=len(bgr) if bgr is not None else -1,
+                )
+            except Exception:
+                pass
+        # endregion agent log
+        if self._config.multi_camera_mode != "stations":
+            return
+        cols = self._preview_targets.get(cam_idx)
+        if not cols:
             return
         wh = self._pip_wh.get(cam_idx)
         if not wh:
             return
         w, h = wh
-        max_px = self._dual_panel.preview_max_scale_px(col)
-        pix = bgr_bytes_to_pixmap(
-            bgr, w, h, max_w=max_px, fast_scale=self._dual_panel.preview_uses_fast_scale()
-        )
-        if pix is None:
-            return
-        self._dual_panel.set_preview_column(col, pix)
+        for col in cols:
+            self._dual_panel.set_preview_column(col, bgr, w, h)
 
     def _on_serial_decoded(self, station_id: str, text: str) -> None:
         if self._shutdown_countdown and self._countdown_dialog is not None:
@@ -329,15 +581,15 @@ class MainWindow(QMainWindow):
         text = normalize_manual_order_text(text)
         if not text:
             return
-        # Chỉ debounce khi không đang ghi: wedge/COM có thể gửi trùng nhanh khi chờ đơn.
-        # Khi đang ghi, quét lại cùng mã phải tới state machine để dừng — không được chặn.
+        # Chỉ khi không đang ghi: bỏ qua lần gửi thứ 2 cùng mã trong cửa sổ ngắn (wedge/COM nhảy đôi).
+        # Khi đang ghi, mọi lần quét phải tới state machine (dừng / v.v.) — không chặn.
         now = time.monotonic()
         if not self._recorders.get(station_id):
             last = self._serial_submit_debounce.get(station_id)
             if (
                 last
                 and last[0] == text
-                and (now - last[1]) < _MANUAL_ORDER_DEBOUNCE_S
+                and (now - last[1]) < _SERIAL_SAME_CODE_DEBOUNCE_S
             ):
                 return
         self._serial_submit_debounce[station_id] = (text, now)
@@ -349,6 +601,13 @@ class MainWindow(QMainWindow):
                 5000,
             )
         self._handle_decode_station(station_id, text)
+
+    def _on_worker_capture_failed(self, cam_idx: int, message: str) -> None:
+        if cam_idx in self._rtsp_error_shown:
+            return
+        self._rtsp_error_shown.add(cam_idx)
+        self._status.showMessage(message, 8000)
+        QMessageBox.warning(self, "Lỗi kết nối RTSP", message)
 
     def _on_serial_failed(self, station_id: str, message: str) -> None:
         st = self._station_by_id(station_id)
@@ -381,9 +640,50 @@ class MainWindow(QMainWindow):
             s.station_id: OrderStateMachine() for s in self._effective_stations()
         }
         self._recorders = {s.station_id: None for s in self._effective_stations()}
+        self._refresh_preview_roi_locks()
+
+    def _refresh_preview_roi_locks(self) -> None:
+        if self._config.multi_camera_mode != "stations":
+            return
+        for col, st in enumerate(self._config.stations[:2]):
+            self._dual_panel.set_preview_roi_locked(
+                col, bool(self._recorders.get(st.station_id))
+            )
+
+    def _station_row_index(self, st: StationConfig) -> int:
+        for i, s in enumerate(self._config.stations[:2]):
+            if s.station_id == st.station_id:
+                return i
+        return 0
+
+    def _recording_dims_for_station(self, st: StationConfig) -> tuple[int, int]:
+        idx = self._station_row_index(st)
+        cam = station_record_cam_id(st, idx)
+        full = self._pip_wh.get(cam)
+        if not full:
+            return (self._frame_w, self._frame_h)
+        fw, fh = full
+        roi = st.record_roi_norm
+        if roi is None:
+            return (fw, fh)
+        _px, _py, pw, ph = norm_to_pixels(
+            roi[0], roi[1], roi[2], roi[3], fw, fh, even=True
+        )
+        return (pw, ph)
+
+    def _record_roi_for_camera(self, cam: int) -> Optional[tuple[float, float, float, float]]:
+        if self._config.multi_camera_mode != "stations":
+            return None
+        for i, st in enumerate(self._config.stations[:2]):
+            if station_record_cam_id(st, i) == cam:
+                return st.record_roi_norm
+        return None
 
     def _update_packer_message(self) -> None:
-        hint = "Quét mã đơn → bắt đầu ghi; quét lại cùng mã → dừng."
+        hint = (
+            "Đọc mã bằng camera: quét đơn → ghi; quét lại cùng mã không dừng; "
+            "quét mã khác → dừng và ghi đơn mới. Máy COM: quét lại cùng mã → dừng."
+        )
         if self._config.multi_camera_mode == "stations":
             names = ", ".join(s.packer_label for s in self._config.stations)
             self._status.showMessage(f"Quầy: {names}. {hint}", 0)
@@ -419,6 +719,10 @@ class MainWindow(QMainWindow):
         self._begin_shutdown_sequence()
 
     def _begin_shutdown_sequence(self) -> None:
+        mark_session_phase(
+            "Hẹn giờ tắt máy: đã mở đếm ngược 60s — hủy bằng nút hoặc quét mã; "
+            "hết giờ sẽ tắt Windows (không chỉ thoát app). Tắt tính năng: Tệp → Cài đặt."
+        )
         self._stop_all_recording_for_shutdown()
         self._shutdown_countdown = True
         dlg = ShutdownCountdownDialog(self)
@@ -459,10 +763,12 @@ class MainWindow(QMainWindow):
                 self._config.pip_sub_camera_index,
             }
         cams: set[int] = set()
-        for st in self._config.stations:
-            cams.add(st.record_camera_index)
+        for i, st in enumerate(self._config.stations):
+            cams.add(station_record_cam_id(st, i))
             if not station_uses_serial_scanner(st):
                 cams.add(st.decode_camera_index)
+            if st.preview_display_index >= 0:
+                cams.add(st.preview_display_index)
         return cams
 
     def _camera_should_decode(self, cam: int) -> bool:
@@ -480,56 +786,191 @@ class MainWindow(QMainWindow):
         self._serial_workers.clear()
 
     def _restart_scan_workers(self) -> None:
-        self._pip_timer.stop()
-        self._stop_serial_workers()
-        for w in self._workers.values():
-            w.stop_worker()
-        for w in self._workers.values():
-            w.wait(5000)
-        self._workers.clear()
-        self._camera_fps.clear()
-        self._manual_submit_debounce.clear()
-        self._serial_submit_debounce.clear()
-        self._pip_last_frame.clear()
-        self._preview_route.clear()
-        if self._config.multi_camera_mode == "stations":
-            self._dual_panel.clear_previews()
-            for col, st in enumerate(self._config.stations[:2]):
-                self._preview_route[st.record_camera_index] = col
+        if self._restart_in_progress:
+            self._restart_pending = True
+            # region agent log
+            try:
+                from packrecorder.debug_ndjson import dbg
 
-        is_sd = lambda: self._shutdown_countdown
-        for cam in sorted(self._required_camera_indices()):
-            decode = self._camera_should_decode(cam)
-            w = ScanWorker(
-                cam,
-                decode_enabled=decode,
-                is_shutdown_countdown=is_sd,
-                preview_fps=24.0 if self._config.multi_camera_mode == "stations" else 0.0,
-            )
-            w.decoded.connect(self._on_decoded)
-            w.frame_ready.connect(self._on_frame)
-            w.camera_opened.connect(self._on_camera_opened_slot)
-            if self._config.multi_camera_mode == "stations":
-                w.preview_ready.connect(self._on_worker_preview)
-            w.start()
-            self._workers[cam] = w
-
-        if self._config.multi_camera_mode == "stations":
-            for st in self._config.stations:
-                if not station_uses_serial_scanner(st):
-                    continue
-                port = st.scanner_serial_port.strip()
-                if not port:
-                    continue
-                sw = SerialScanWorker(
-                    st.station_id,
-                    port,
-                    baudrate=st.scanner_serial_baud,
+                dbg(
+                    "H3",
+                    "main_window._restart_scan_workers",
+                    "coalesced_restart",
                 )
-                sw.line_decoded.connect(self._on_serial_decoded)
-                sw.failed.connect(self._on_serial_failed)
-                sw.start()
-                self._serial_workers[st.station_id] = sw
+            except Exception:
+                pass
+            # endregion agent log
+            return
+        self._restart_in_progress = True
+        # region agent log
+        try:
+            from packrecorder.debug_ndjson import dbg
+
+            dbg(
+                "H3",
+                "main_window._restart_scan_workers",
+                "start",
+                mode=self._config.multi_camera_mode,
+                required=sorted(self._required_camera_indices()),
+            )
+        except Exception:
+            pass
+        # endregion agent log
+        try:
+            self._pip_timer.stop()
+            self._stop_serial_workers()
+            for pl in list(self._mp_pipelines.values()):
+                pl.stop()
+            self._mp_pipelines.clear()
+            self._mp_preview_last_mono.clear()
+            self._mp_service_timer.stop()
+            old_workers = list(self._workers.values())
+            for w in old_workers:
+                w.stop_worker()
+            for w in old_workers:
+                w.wait(5000)
+            alive = [w.camera_index for w in old_workers if w.isRunning()]
+            self._workers.clear()
+            self._camera_fps.clear()
+            self._serial_submit_debounce.clear()
+            self._rtsp_error_shown.clear()
+            self._pip_last_frame.clear()
+            self._preview_targets.clear()
+            if self._config.multi_camera_mode == "stations":
+                self._dual_panel.clear_previews()
+            if alive:
+                # region agent log
+                try:
+                    from packrecorder.debug_ndjson import dbg
+
+                    dbg(
+                        "H3",
+                        "main_window._restart_scan_workers",
+                        "old_workers_still_alive",
+                        alive=alive,
+                    )
+                except Exception:
+                    pass
+                # endregion agent log
+                self._restart_pending = True
+                QTimer.singleShot(300, self._restart_scan_workers)
+                return
+
+            is_sd = lambda: self._shutdown_countdown
+            cap_wh = target_dimensions_for_preset(self._config.record_resolution)
+            use_mp = self._config.use_multiprocessing_camera_pipeline
+            for cam in sorted(self._required_camera_indices()):
+                decode = self._camera_should_decode(cam)
+                cap_src: int | str = cam
+                fallback_usb_idx: int | None = None
+                use_cap_wh = True
+                if self._config.multi_camera_mode == "stations":
+                    for i, st in enumerate(self._config.stations):
+                        if station_record_cam_id(st, i) != cam:
+                            continue
+                        if (
+                            st.record_camera_kind == "rtsp"
+                            and (st.record_rtsp_url or "").strip()
+                        ):
+                            cap_src = (st.record_rtsp_url or "").strip()
+                            fallback_usb_idx = i if 0 <= i <= 9 else 0
+                            use_cap_wh = False
+                        break
+                roi = self._record_roi_for_camera(cam)
+                if use_mp:
+                    pl = MpCameraPipeline(
+                        camera_index=cam,
+                        capture_source=cap_src,
+                        fallback_usb_index=fallback_usb_idx,
+                        capture_target_wh=cap_wh if use_cap_wh else None,
+                        use_capture_resolution=use_cap_wh,
+                        decode_enabled=decode,
+                        record_roi_norm=roi,
+                        decode_every_n_frames=self._config.barcode_scan_interval_frames,
+                        decode_scan_scale=self._config.barcode_scan_scale,
+                        debounce_s=0.35,
+                    )
+                    pl.start()
+                    self._mp_pipelines[cam] = pl
+                else:
+                    w = ScanWorker(
+                        cam,
+                        capture_source=cap_src,
+                        fallback_usb_index=fallback_usb_idx,
+                        decode_enabled=decode,
+                        is_shutdown_countdown=is_sd,
+                        preview_fps=30.0
+                        if self._config.multi_camera_mode == "stations"
+                        else 0.0,
+                        capture_target_wh=cap_wh if use_cap_wh else None,
+                        decode_every_n_frames=self._config.barcode_scan_interval_frames,
+                        decode_scan_scale=self._config.barcode_scan_scale,
+                        record_roi_norm=roi,
+                    )
+                    w.decoded.connect(self._on_decoded)
+                    w.frame_ready.connect(self._on_frame)
+                    w.camera_opened.connect(self._on_camera_opened_slot)
+                    w.capture_failed.connect(self._on_worker_capture_failed)
+                    if self._config.multi_camera_mode == "stations":
+                        w.preview_ready.connect(self._on_worker_preview)
+                    w.start()
+                    self._workers[cam] = w
+            if use_mp:
+                self._mp_service_timer.start()
+            else:
+                self._mp_service_timer.stop()
+
+            if self._config.multi_camera_mode == "stations":
+                for st in self._config.stations:
+                    if not station_uses_serial_scanner(st):
+                        continue
+                    port = st.scanner_serial_port.strip()
+                    if not port:
+                        continue
+                    sw = SerialScanWorker(
+                        st.station_id,
+                        port,
+                        baudrate=st.scanner_serial_baud,
+                    )
+                    sw.line_decoded.connect(self._on_serial_decoded)
+                    sw.failed.connect(self._on_serial_failed)
+                    sw.start()
+                    self._serial_workers[st.station_id] = sw
+
+            if self._config.multi_camera_mode == "stations":
+                self._rebuild_preview_targets()
+            # region agent log
+            try:
+                from packrecorder.debug_ndjson import dbg
+
+                dbg(
+                    "H3",
+                    "main_window._restart_scan_workers",
+                    "done",
+                    workers=len(self._workers),
+                    mp_pipelines=len(self._mp_pipelines),
+                )
+            except Exception:
+                pass
+            # endregion agent log
+        finally:
+            self._restart_in_progress = False
+            if self._restart_pending:
+                self._restart_pending = False
+                QTimer.singleShot(0, self._restart_scan_workers)
+
+    def _rebuild_preview_targets(self) -> None:
+        """Camera index → các cột hiển thị preview (một camera có thể hiện ở nhiều cột)."""
+        self._preview_targets.clear()
+        if self._config.multi_camera_mode != "stations":
+            return
+        for col, st in enumerate(self._config.stations[:2]):
+            cam = (
+                station_record_cam_id(st, col)
+                if st.preview_display_index < 0
+                else st.preview_display_index
+            )
+            self._preview_targets.setdefault(cam, []).append(col)
 
     def _on_camera_opened_slot(self, cam: int, w: int, h: int, fps: int) -> None:
         self._pip_wh[cam] = (w, h)
@@ -557,19 +998,66 @@ class MainWindow(QMainWindow):
                 return i
         return None
 
-    def _recording_banner_text(self, st: StationConfig, order: str) -> str:
-        short_order = order if len(order) <= 48 else order[:45] + "…"
-        rec_cam = st.record_camera_index
+    def _recording_src_short(self, st: StationConfig) -> str:
         if station_uses_serial_scanner(st):
             port = (st.scanner_serial_port or "").strip()
-            src = f"máy quét USB ({port})" if port else "máy quét USB"
-        else:
-            src = f"camera đọc mã {st.decode_camera_index}"
+            return port if port else "COM"
+        return f"cam{st.decode_camera_index}"
+
+    def _record_camera_label_for_status(self, st: StationConfig, row: int) -> str:
+        if st.record_camera_kind == "rtsp" and (st.record_rtsp_url or "").strip():
+            return "RTSP"
+        return f"cam{station_record_cam_id(st, row)}"
+
+    def _station_recording_status_one_line(
+        self, st: StationConfig, order: str, elapsed: str
+    ) -> str:
+        short_order = order if len(order) <= 36 else order[:33] + "…"
+        row = self._station_row_index(st)
+        rec_cam = self._record_camera_label_for_status(st, row)
+        src = self._recording_src_short(st)
         return (
-            f"ĐANG GHI HÌNH — {st.packer_label}\n"
-            f"Đơn: {short_order}\n"
-            f"Đang quay: camera {rec_cam}  ·  Quét từ: {src}"
+            f"● GHI | {st.packer_label} | Đơn {short_order} | {elapsed} "
+            f"| quay:{rec_cam} | quét:{src}"
         )
+
+    def _station_recording_overlay_pixmap(
+        self, order: str, packer: str, started_at: datetime
+    ) -> QPixmap | None:
+        arr = render_recording_overlay_chip_rgba(
+            order=order,
+            packer=packer,
+            wall_now=datetime.now(),
+            started_at=started_at,
+        )
+        if arr is None or arr.size == 0:
+            return None
+        h, w = arr.shape[:2]
+        qimg = QImage(
+            arr.data,
+            w,
+            h,
+            4 * w,
+            QImage.Format.Format_RGBA8888,
+        )
+        qimg = qimg.copy()
+        pix = QPixmap.fromImage(qimg)
+        dpr = self.devicePixelRatioF()
+        if dpr and dpr > 1.0:
+            pix.setDevicePixelRatio(dpr)
+        return pix
+
+    def _update_station_recording_overlay_ui(
+        self, col: int, st: StationConfig, order: str, started_at: datetime
+    ) -> None:
+        pix = self._station_recording_overlay_pixmap(order, st.packer_label, started_at)
+        if pix is not None:
+            self._dual_panel.set_column_recording_overlay_pixmap(col, pix)
+        else:
+            el = _format_recording_elapsed(started_at)
+            self._dual_panel.set_column_recording_banner(
+                col, self._station_recording_status_one_line(st, order, el)
+            )
 
     def _sync_stations_recording_chip(self) -> None:
         if self._config.multi_camera_mode != "stations":
@@ -606,6 +1094,7 @@ class MainWindow(QMainWindow):
                 self._rec_elapsed_bar.setVisible(False)
             if self._config.multi_camera_mode == "stations":
                 self._dual_panel.clear_recording_timers()
+                self._dual_panel.clear_recording_banners()
             return
         if not self._rec_elapsed_timer.isActive():
             self._rec_elapsed_resync_wall_second = True
@@ -633,12 +1122,10 @@ class MainWindow(QMainWindow):
                 if self._recorders.get(sid):
                     t0 = self._recording_started_at.get(sid)
                     if t0:
-                        el = _format_recording_elapsed(t0)
-                        self._dual_panel.set_column_recording_timer(
-                            col, f"● ĐANG QUAY  {el}"
+                        order = self._station_recording_order.get(sid, "")
+                        self._update_station_recording_overlay_ui(
+                            col, st, order, t0
                         )
-                else:
-                    self._dual_panel.set_column_recording_timer(col, None)
         elif self._config.multi_camera_mode == "pip":
             if self._recorders.get("pip") and self._recording_started_at.get("pip"):
                 el = _format_recording_elapsed(self._recording_started_at["pip"])
@@ -779,10 +1266,10 @@ class MainWindow(QMainWindow):
             if self._recorders.get("single") and cam_idx == self._config.camera_index:
                 self._latest_record_bgr["single"] = bgr
             return
-        for st in self._config.stations:
+        for i, st in enumerate(self._config.stations):
             if (
                 self._recorders.get(st.station_id)
-                and cam_idx == st.record_camera_index
+                and cam_idx == station_record_cam_id(st, i)
             ):
                 self._latest_record_bgr[st.station_id] = bgr
 
@@ -796,9 +1283,9 @@ class MainWindow(QMainWindow):
             if self._recorders.get("single"):
                 active_record_cams.add(self._config.camera_index)
         else:
-            for st in self._config.stations:
+            for i, st in enumerate(self._config.stations):
                 if self._recorders.get(st.station_id):
-                    active_record_cams.add(st.record_camera_index)
+                    active_record_cams.add(station_record_cam_id(st, i))
         for cam, w in self._workers.items():
             w.set_recording(cam in active_record_cams)
 
@@ -840,16 +1327,6 @@ class MainWindow(QMainWindow):
         if not text:
             return
         sid = self._config.stations[col].station_id
-        now = time.monotonic()
-        if not self._recorders.get(sid):
-            last = self._manual_submit_debounce.get(col)
-            if (
-                last
-                and last[0] == text
-                and (now - last[1]) < _MANUAL_ORDER_DEBOUNCE_S
-            ):
-                return
-        self._manual_submit_debounce[col] = (text, now)
         st = self._config.stations[col]
         short = text if len(text) <= 64 else text[:61] + "…"
         self._status.showMessage(f"[{st.packer_label}] Nhập tay: {short}", 5000)
@@ -861,11 +1338,14 @@ class MainWindow(QMainWindow):
         if not code:
             return
         sm = self._order_sm["pip"]
-        r = sm.on_scan(code, is_shutdown_countdown=False)
+        r = sm.on_scan(
+            code,
+            is_shutdown_countdown=False,
+            same_scan_stops_recording=False,
+            now_mono=time.monotonic(),
+        )
         if r.should_start_recording and r.new_active_order:
-            self._begin_recording_pip(
-                r.new_active_order, check_dup=r.should_check_duplicate
-            )
+            self._begin_recording_pip(r.new_active_order)
         if r.should_stop_recording:
             self._stop_recording_after_scan("pip", r)
 
@@ -876,44 +1356,47 @@ class MainWindow(QMainWindow):
         sm = self._order_sm.get(station_id)
         if sm is None:
             return
-        r = sm.on_scan(code, is_shutdown_countdown=False)
+        st = self._station_by_id(station_id)
+        same_stop = True
+        if st is not None:
+            same_stop = station_uses_serial_scanner(st)
+        r = sm.on_scan(
+            code,
+            is_shutdown_countdown=False,
+            same_scan_stops_recording=same_stop,
+            now_mono=time.monotonic(),
+        )
         if r.should_start_recording and r.new_active_order:
-            self._begin_recording_station(
-                station_id,
-                r.new_active_order,
-                check_dup=r.should_check_duplicate,
-            )
+            self._begin_recording_station(station_id, r.new_active_order)
         if r.should_stop_recording:
             self._stop_recording_after_scan(station_id, r)
 
-    def _begin_recording_station(
-        self, station_id: str, order: str, *, check_dup: bool
-    ) -> None:
+    def _begin_recording_station(self, station_id: str, order: str) -> None:
         st = self._station_by_id(station_id)
         if st is None:
             return
         root = Path(self._config.video_root)
         root.mkdir(parents=True, exist_ok=True)
-        dup = False
-        if check_dup:
-            dup = is_duplicate_order(root, order, date.today())
-            if dup:
-                self._status.showMessage(
-                    f"[{st.packer_label}] Đơn {order} đã có video hôm nay — vẫn ghi thêm.",
-                    8000,
-                )
         try:
             ff = _resolve_ffmpeg(self._config)
         except FileNotFoundError:
             self._show_ffmpeg_missing_dialog()
             self._order_sm[station_id] = OrderStateMachine()
             return
-        w, h = self._pip_wh.get(st.record_camera_index, (self._frame_w, self._frame_h))
-        fps = self._camera_fps.get(st.record_camera_index, self._frame_fps)
+        w, h = self._recording_dims_for_station(st)
+        fps_out = max(1, min(60, int(self._config.record_fps)))
         out = build_output_path(
             root, order, st.packer_label, datetime.now()
         )
-        rec = FFmpegPipeRecorder(ff, w, h, fps)
+        rec = FFmpegPipeRecorder(
+            ff,
+            w,
+            h,
+            fps_out,
+            codec_preference=self._config.record_video_codec,
+            bitrate_kbps=self._config.record_video_bitrate_kbps,
+            h264_crf=self._config.record_h264_crf,
+        )
         try:
             rec.start(out)
         except Exception as e:  # noqa: BLE001
@@ -927,39 +1410,31 @@ class MainWindow(QMainWindow):
             order, st.packer_label, t0
         )
         self._recording_frame_wh[station_id] = (w, h)
-        self._recording_emit_fps[station_id] = fps
+        self._recording_emit_fps[station_id] = fps_out
         self._recording_next_emit_mono[station_id] = time.monotonic()
         self._latest_record_bgr.pop(station_id, None)
+        sm = self._order_sm.get(station_id)
+        if sm is not None:
+            sm.mark_recording_started(time.monotonic())
         self._ensure_record_pace_timer()
         self._refresh_worker_recording_flags()
         if self._config.multi_camera_mode == "stations":
             self._station_recording_order[station_id] = order
             col = self._station_column(station_id)
             if col is not None:
-                self._dual_panel.set_column_recording_banner(
-                    col, self._recording_banner_text(st, order)
-                )
+                self._update_station_recording_overlay_ui(col, st, order, t0)
             self._sync_stations_recording_chip()
         else:
             self._station_recording_order[station_id] = order
             self._chip.setText(f"Đang ghi ({st.packer_label}): {order}")
             self._chip.setStyleSheet(_CHIP_REC_STYLE)
         self._sync_recording_elapsed_timer()
-        if dup:
-            self._feedback.play_quad()
-        else:
-            self._feedback.play_short()
+        self._feedback.play_short()
+        self._refresh_preview_roi_locks()
 
-    def _begin_recording_pip(self, order: str, *, check_dup: bool) -> None:
+    def _begin_recording_pip(self, order: str) -> None:
         root = Path(self._config.video_root)
         root.mkdir(parents=True, exist_ok=True)
-        dup = False
-        if check_dup:
-            dup = is_duplicate_order(root, order, date.today())
-            if dup:
-                self._status.showMessage(
-                    f"Đơn {order} đã có video hôm nay — vẫn ghi thêm.", 8000
-                )
         try:
             ff = _resolve_ffmpeg(self._config)
         except FileNotFoundError:
@@ -969,9 +1444,16 @@ class MainWindow(QMainWindow):
         out = build_output_path(
             root, order, self._config.packer_label, datetime.now()
         )
-        mc = self._config.pip_main_camera_index
-        fps_pip = self._camera_fps.get(mc, self._frame_fps)
-        rec = FFmpegPipeRecorder(ff, self._frame_w, self._frame_h, fps_pip)
+        fps_out = max(1, min(60, int(self._config.record_fps)))
+        rec = FFmpegPipeRecorder(
+            ff,
+            self._frame_w,
+            self._frame_h,
+            fps_out,
+            codec_preference=self._config.record_video_codec,
+            bitrate_kbps=self._config.record_video_bitrate_kbps,
+            h264_crf=self._config.record_h264_crf,
+        )
         try:
             rec.start(out)
         except Exception as e:  # noqa: BLE001
@@ -986,16 +1468,16 @@ class MainWindow(QMainWindow):
         )
         self._station_recording_order["pip"] = order
         self._pip_last_frame.clear()
-        interval = max(16, int(1000 / max(1, fps_pip)))
+        interval = max(16, int(1000 / max(1, fps_out)))
         self._pip_timer.start(interval)
         self._refresh_worker_recording_flags()
         self._chip.setText(f"PIP đang ghi: {order}")
         self._chip.setStyleSheet(_CHIP_REC_STYLE)
         self._sync_recording_elapsed_timer()
-        if dup:
-            self._feedback.play_quad()
-        else:
-            self._feedback.play_short()
+        pip_sm = self._order_sm.get("pip")
+        if pip_sm is not None:
+            pip_sm.mark_recording_started(time.monotonic())
+        self._feedback.play_short()
 
     def _stop_recording_for_station(self, station_id: str) -> None:
         if self._config.multi_camera_mode == "pip" and station_id == "pip":
@@ -1019,6 +1501,7 @@ class MainWindow(QMainWindow):
             self._sync_stations_recording_chip()
         self._refresh_worker_recording_flags()
         self._sync_recording_elapsed_timer()
+        self._refresh_preview_roi_locks()
 
     def _stop_all_recording_for_shutdown(self) -> None:
         self._pip_timer.stop()
@@ -1060,19 +1543,14 @@ class MainWindow(QMainWindow):
         self._refresh_worker_recording_flags()
         sm = self._order_sm.get(station_id)
         if sm is None:
+            self._refresh_preview_roi_locks()
             return
         nr = sm.notify_stop_confirmed()
         if nr.should_start_recording and nr.new_active_order:
             if self._config.multi_camera_mode == "pip":
-                self._begin_recording_pip(
-                    nr.new_active_order, check_dup=nr.should_check_duplicate
-                )
+                self._begin_recording_pip(nr.new_active_order)
             else:
-                self._begin_recording_station(
-                    station_id,
-                    nr.new_active_order,
-                    check_dup=nr.should_check_duplicate,
-                )
+                self._begin_recording_station(station_id, nr.new_active_order)
         else:
             if self._config.multi_camera_mode == "stations":
                 self._sync_stations_recording_chip()
@@ -1080,11 +1558,17 @@ class MainWindow(QMainWindow):
                 self._chip.setText("Chờ quét mã đơn")
                 self._chip.setStyleSheet(_CHIP_IDLE_STYLE)
             self._sync_recording_elapsed_timer()
+        self._refresh_preview_roi_locks()
 
     def _pause_scan_workers(self) -> None:
         self._pip_timer.stop()
         self._record_pace_timer.stop()
         self._stop_serial_workers()
+        for pl in list(self._mp_pipelines.values()):
+            pl.stop()
+        self._mp_pipelines.clear()
+        self._mp_preview_last_mono.clear()
+        self._mp_service_timer.stop()
         for w in list(self._workers.values()):
             w.stop_worker()
         for w in list(self._workers.values()):
@@ -1129,8 +1613,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Đang ghi hình",
-                "Vui lòng dừng ghi (quét lại cùng mã đơn hoặc đóng phiên) trước khi mở Cài đặt "
-                "để xem trước camera.",
+                "Vui lòng dừng ghi (quét lại cùng mã đơn hoặc đóng phiên) trước khi mở Cài đặt.",
             )
             return
         self._pause_scan_workers()
@@ -1146,8 +1629,9 @@ class MainWindow(QMainWindow):
                 self._rebuild_order_machines()
                 self._update_packer_message()
                 self._update_central_page()
+                self._sync_record_resolution_combo_from_config()
+                self._sync_always_on_top_from_config()
         finally:
-            dlg.dispose_preview()
             self._restart_scan_workers()
 
     def _cleanup_workers(self) -> None:
@@ -1155,6 +1639,11 @@ class MainWindow(QMainWindow):
         self._rec_elapsed_timer.stop()
         self._rec_elapsed_resync_wall_second = True
         self._stop_serial_workers()
+        for pl in list(self._mp_pipelines.values()):
+            pl.stop()
+        self._mp_pipelines.clear()
+        self._mp_preview_last_mono.clear()
+        self._mp_service_timer.stop()
         for w in self._workers.values():
             w.stop_worker()
         for w in self._workers.values():
@@ -1179,6 +1668,9 @@ class MainWindow(QMainWindow):
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
         super().showEvent(event)
         QTimer.singleShot(0, self._sync_dual_cinema_mode)
+        if not self._did_startup_focus:
+            self._did_startup_focus = True
+            QTimer.singleShot(100, self._focus_for_scanner_wedge)
 
     def changeEvent(self, event: QEvent) -> None:  # noqa: N802
         if event.type() == QEvent.Type.WindowStateChange:
@@ -1186,7 +1678,10 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        mark_session_phase("MainWindow.closeEvent — người dùng hoặc hệ thống đóng cửa sổ.")
+        mark_session_phase(
+            "MainWindow.closeEvent — cửa sổ chính đóng (thường: bấm X / Alt+F4; "
+            "hoặc môi trường chạy kết thúc tiến trình; không phải lỗi nếu bạn chủ động thoát)."
+        )
         self._stop_all_recording_for_shutdown()
         self._cleanup_workers()
         super().closeEvent(event)

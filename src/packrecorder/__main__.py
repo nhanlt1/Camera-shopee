@@ -31,6 +31,9 @@ def main() -> None:
     # SILENT: bớt spam VIDEOIO/FFmpeg/obsensor khi quét index camera.
     os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
     os.environ.setdefault("OPENCV_VIDEOIO_DEBUG", "0")
+    # MSMF: tắt HW transforms giúp nhiều webcam mở nhanh hơn / ít treo lúc set độ phân giải
+    # (phải đặt trước khi nạp OpenCV; khuyến nghị upstream / diễn đàn OpenCV).
+    os.environ.setdefault("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0")
     try:
         from packrecorder.app import run_app
 
@@ -73,4 +76,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     main()

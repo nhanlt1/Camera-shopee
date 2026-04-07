@@ -7,8 +7,16 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from packrecorder.record_resolution import normalize_record_resolution_preset
+from packrecorder.record_roi import clamp_norm_rect
+
 SoundMode = Literal["speaker", "scanner_host"]
 MultiCameraMode = Literal["single", "stations", "pip"]
+RecordVideoCodec = Literal["auto", "hevc", "h264"]
+RecordCameraKind = Literal["usb", "rtsp"]
+
+# Camera IP RTSP (Đa quầy): id logic 10 = quầy 0, 11 = quầy 1 — không trùng index USB 0–9.
+STATION_RTSP_LOGICAL_ID_BASE = 10
 
 
 @dataclass
@@ -17,9 +25,16 @@ class StationConfig:
     packer_label: str = "Máy 1"
     record_camera_index: int = 0
     decode_camera_index: int = 0
+    # usb: dùng record_camera_index 0–9. rtsp: URL đầy đủ; id logic ghi/ghi preview là 10/11.
+    record_camera_kind: RecordCameraKind = "usb"
+    record_rtsp_url: str = ""
     # Máy quét mã USB dạng serial (COM). Rỗng = đọc mã bằng camera + pyzbar.
     scanner_serial_port: str = ""
     scanner_serial_baud: int = 9600
+    # -1 = xem trước trùng camera ghi quầy này; >=0 = index camera xem trước.
+    preview_display_index: int = -1
+    # (x, y, w, h) chuẩn hoá 0..1 theo khung camera ghi; None = toàn khung.
+    record_roi_norm: tuple[float, float, float, float] | None = None
 
 
 def default_stations() -> list[StationConfig]:
@@ -29,14 +44,26 @@ def default_stations() -> list[StationConfig]:
     ]
 
 
+def _normalize_record_camera_kind(value: object) -> RecordCameraKind:
+    v = str(value or "").strip().lower()
+    return "rtsp" if v == "rtsp" else "usb"
+
+
+def station_record_cam_id(st: StationConfig, station_index: int) -> int:
+    if st.record_camera_kind == "rtsp" and (st.record_rtsp_url or "").strip():
+        return STATION_RTSP_LOGICAL_ID_BASE + int(station_index)
+    return int(st.record_camera_index)
+
+
 @dataclass
 class AppConfig:
-    schema_version: int = 2
+    schema_version: int = 5
     video_root: str = ""
     camera_index: int = 0
     packer_label: str = "Máy 1"
     ffmpeg_path: str = ""
-    shutdown_enabled: bool = True
+    # Mặc định tắt: tránh đến giờ hẹn app bật đếm ngược rồi gọi tắt Windows (dễ tưởng app tự thoát).
+    shutdown_enabled: bool = False
     shutdown_time_hhmm: str = "18:00"
     sound_enabled: bool = True
     sound_mode: SoundMode = "speaker"
@@ -53,6 +80,24 @@ class AppConfig:
     pip_decode_camera_index: int = 0
     pip_overlay_max_width: int = 320
     pip_overlay_margin: int = 10
+    # native | vga | hd | full_hd — mặc định HD 720p cho cân bằng chất lượng / hiệu năng.
+    record_resolution: str = "hd"
+    # FPS đích khi ghi file (đồng bộ ffmpeg -r và nhịp đẩy khung).
+    record_fps: int = 30
+    # auto: HEVC nếu FFmpeg có libx265, không thì H.264; h264 mặc định — ít tải CPU khi quay realtime.
+    record_video_codec: RecordVideoCodec = "h264"
+    # libx264 realtime: CRF 25–28 tiết kiệm dung lượng, ultrafast trong FFmpegPipeRecorder.
+    record_h264_crf: int = 26
+    # libx265 (auto/hevc): giữ bitrate khi không dùng CRF.
+    record_video_bitrate_kbps: int = 3000
+    # pyzbar: quét 1 / N khung (15 ≈ 2 Hz @30fps). Giảm CPU; tăng nếu bỏ sót mã.
+    barcode_scan_interval_frames: int = 15
+    # Thu nhỏ ảnh trước khi pyzbar (0.5 = 50% kích thước mỗi cạnh).
+    barcode_scan_scale: float = 0.5
+    # Cửa sổ luôn trên cùng (giúp thấy app; với máy quét kiểu bàn phím nên kèm focus ô mã).
+    window_always_on_top: bool = True
+    # Capture + pyzbar trong multiprocessing + SharedMemory (Windows spawn); tắt = luồng QThread cũ.
+    use_multiprocessing_camera_pipeline: bool = False
 
 
 def _station_from_dict(d: dict[str, Any]) -> StationConfig:
@@ -60,6 +105,9 @@ def _station_from_dict(d: dict[str, Any]) -> StationConfig:
     kw = {k: v for k, v in d.items() if k in known}
     if "station_id" not in kw or not kw["station_id"]:
         kw["station_id"] = str(uuid.uuid4())
+    r = kw.get("record_roi_norm")
+    if r is not None and isinstance(r, list) and len(r) == 4:
+        kw["record_roi_norm"] = tuple(float(r[i]) for i in range(4))
     return StationConfig(**kw)
 
 
@@ -113,9 +161,10 @@ def ensure_decode_camera_not_peer_record(cfg: AppConfig) -> None:
             if station_uses_serial_scanner(st):
                 continue
             other = cfg.stations[1 - i]
-            if st.decode_camera_index == other.record_camera_index:
+            other_rec = station_record_cam_id(other, 1 - i)
+            if st.decode_camera_index == other_rec:
                 cfg.stations[i] = replace(
-                    st, decode_camera_index=st.record_camera_index
+                    st, decode_camera_index=station_record_cam_id(st, i)
                 )
                 changed = True
         if not changed:
@@ -126,31 +175,118 @@ def ensure_distinct_station_record_cameras(cfg: AppConfig) -> None:
     """Hai quầy không dùng chung một camera ghi (tránh một webcam hiện ở cả hai cột)."""
     if cfg.multi_camera_mode != "stations" or len(cfg.stations) < 2:
         return
-    a = cfg.stations[0].record_camera_index
-    b = cfg.stations[1].record_camera_index
-    if a != b:
+    s0, s1 = cfg.stations[0], cfg.stations[1]
+    if (
+        s0.record_camera_kind == "rtsp"
+        and s1.record_camera_kind == "rtsp"
+        and (s0.record_rtsp_url or "").strip()
+        and (s0.record_rtsp_url or "").strip() == (s1.record_rtsp_url or "").strip()
+    ):
+        rid0 = station_record_cam_id(s0, 0)
+        alt = next((i for i in range(10) if i != rid0), 1)
+        cfg.stations[1] = replace(
+            s1, record_camera_kind="usb", record_rtsp_url="", record_camera_index=alt
+        )
         return
+    id0 = station_record_cam_id(s0, 0)
+    id1 = station_record_cam_id(s1, 1)
+    if id0 != id1:
+        return
+    a = id0
     for alt in range(10):
         if alt != a:
-            s1 = cfg.stations[1]
             cfg.stations[1] = replace(s1, record_camera_index=alt)
             return
+
+
+def normalize_record_video_codec(value: str) -> RecordVideoCodec:
+    s = (value or "").strip().lower()
+    if s in ("hevc", "h265", "x265"):
+        return "hevc"
+    if s in ("h264", "avc", "x264"):
+        return "h264"
+    if s == "auto":
+        return "auto"
+    return "auto"
 
 
 def normalize_config(cfg: AppConfig) -> AppConfig:
     if cfg.multi_camera_mode == "stations" and not cfg.stations:
         cfg.stations = default_stations()
-    for s in cfg.stations:
+    for i, s in enumerate(cfg.stations):
+        kind = _normalize_record_camera_kind(s.record_camera_kind)
+        url = (s.record_rtsp_url or "").strip()
+        if kind == "rtsp" and not url:
+            kind = "usb"
+        if kind == "rtsp":
+            rid = STATION_RTSP_LOGICAL_ID_BASE + i
+            s = replace(
+                s,
+                record_camera_kind="rtsp",
+                record_rtsp_url=url,
+                record_camera_index=rid,
+            )
+            if not station_uses_serial_scanner(s):
+                s = replace(s, decode_camera_index=rid)
+        else:
+            s = replace(s, record_camera_kind="usb", record_rtsp_url="")
+            if s.record_camera_index < 0:
+                s = replace(s, record_camera_index=0)
+            elif s.record_camera_index > 9:
+                s = replace(s, record_camera_index=9)
+            if not station_uses_serial_scanner(s):
+                s = replace(s, decode_camera_index=s.record_camera_index)
         if s.decode_camera_index < 0:
-            s.decode_camera_index = 0
+            s = replace(s, decode_camera_index=0)
         if s.record_camera_index < 0:
-            s.record_camera_index = 0
+            s = replace(s, record_camera_index=0)
+        if s.preview_display_index < -1 or s.preview_display_index > 99:
+            s = replace(s, preview_display_index=-1)
+        roi = s.record_roi_norm
+        if roi is not None:
+            if isinstance(roi, (list, tuple)) and len(roi) == 4:
+                x, y, w, h = (
+                    float(roi[0]),
+                    float(roi[1]),
+                    float(roi[2]),
+                    float(roi[3]),
+                )
+                s = replace(s, record_roi_norm=clamp_norm_rect(x, y, w, h))
+            else:
+                s = replace(s, record_roi_norm=None)
         if s.scanner_serial_baud < 1200 or s.scanner_serial_baud > 921600:
-            s.scanner_serial_baud = 9600
+            s = replace(s, scanner_serial_baud=9600)
+        cfg.stations[i] = s
     ensure_distinct_station_record_cameras(cfg)
     ensure_decode_camera_not_peer_record(cfg)
     if cfg.pip_main_camera_index == cfg.pip_sub_camera_index:
         cfg.pip_sub_camera_index = min(9, cfg.pip_main_camera_index + 1)
+    cfg.record_resolution = normalize_record_resolution_preset(cfg.record_resolution)
+    if cfg.record_fps < 1:
+        cfg.record_fps = 30
+    elif cfg.record_fps > 60:
+        cfg.record_fps = 60
+    cfg.record_video_codec = normalize_record_video_codec(
+        str(cfg.record_video_codec)
+    )
+    if cfg.record_video_bitrate_kbps < 400:
+        cfg.record_video_bitrate_kbps = 400
+    elif cfg.record_video_bitrate_kbps > 50000:
+        cfg.record_video_bitrate_kbps = 50000
+    if cfg.record_h264_crf < 18:
+        cfg.record_h264_crf = 18
+    elif cfg.record_h264_crf > 35:
+        cfg.record_h264_crf = 35
+    if cfg.barcode_scan_interval_frames < 1:
+        cfg.barcode_scan_interval_frames = 1
+    elif cfg.barcode_scan_interval_frames > 60:
+        cfg.barcode_scan_interval_frames = 60
+    s = float(cfg.barcode_scan_scale)
+    if s < 0.25:
+        cfg.barcode_scan_scale = 0.25
+    elif s > 1.0:
+        cfg.barcode_scan_scale = 1.0
+    cfg.window_always_on_top = bool(cfg.window_always_on_top)
     return cfg
 
 
@@ -170,6 +306,12 @@ def load_config(path: Path) -> AppConfig:
     cfg = _dict_to_config(data)
     if cfg.schema_version < 2:
         cfg.schema_version = 2
+    if cfg.schema_version < 3:
+        cfg.schema_version = 3
+    if cfg.schema_version < 4:
+        cfg.schema_version = 4
+    if cfg.schema_version < 5:
+        cfg.schema_version = 5
     return normalize_config(cfg)
 
 
@@ -189,8 +331,9 @@ def _camera_is_serial_peer_record_feed(
 ) -> bool:
     """Camera này đang là camera ghi của ít nhất một quầy dùng máy quét COM."""
     return any(
-        station_uses_serial_scanner(s) and s.record_camera_index == camera_index
-        for s in stations[:2]
+        station_uses_serial_scanner(s)
+        and station_record_cam_id(s, idx) == camera_index
+        for idx, s in enumerate(stations[:2])
     )
 
 
