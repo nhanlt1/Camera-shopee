@@ -1,10 +1,11 @@
 # Tao repo GitHub moi va push nhanh (can da: gh auth login)
+# Mac dinh: PRIVATE. Repo cong khai: them -Public
 # Vi du: .\scripts\github-first-push.ps1 -RepoName Camera-shopee
-#        .\scripts\github-first-push.ps1 -RepoName packrecorder -Private
+#        .\scripts\github-first-push.ps1 -RepoName packrecorder -Public
 
 param(
     [string] $RepoName = "Camera-shopee",
-    [switch] $Private
+    [switch] $Public
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,7 +22,7 @@ if (git remote get-url origin 2>$null) {
     exit 1
 }
 
-$vis = if ($Private) { "--private" } else { "--public" }
+$vis = if ($Public) { "--public" } else { "--private" }
 gh repo create $RepoName $vis --source . --remote origin --push --description "Pack Recorder - ghi video goi hang + quet ma"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "Xong. Nhanh hien tai:" -ForegroundColor Green
