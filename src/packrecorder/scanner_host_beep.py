@@ -16,6 +16,11 @@ class ScannerHostBeep(ABC):
     def play_long(self) -> None:
         pass
 
+    @abstractmethod
+    def play_quad(self, gap_ms: int) -> None:
+        """Bốn tiếng ngắn liên tiếp (báo trùng đơn)."""
+        ...
+
 
 class NullScannerHostBeep(ScannerHostBeep):
     def play_short(self) -> None:
@@ -25,4 +30,7 @@ class NullScannerHostBeep(ScannerHostBeep):
         return
 
     def play_long(self) -> None:
+        return
+
+    def play_quad(self, gap_ms: int) -> None:
         return

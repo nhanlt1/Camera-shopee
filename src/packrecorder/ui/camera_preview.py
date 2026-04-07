@@ -2,11 +2,50 @@ from __future__ import annotations
 
 from typing import Optional
 
-import cv2
 import numpy as np
+
+from packrecorder.opencv_video import configure_opencv_logging, open_video_capture
+
+import cv2
+
+configure_opencv_logging()
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QLabel
+
+
+def bgr_bytes_to_pixmap(
+    bgr_bytes: bytes,
+    width: int,
+    height: int,
+    max_w: int = 520,
+    *,
+    fast_scale: bool = True,
+) -> Optional[QPixmap]:
+    """Chuyển buffer BGR OpenCV (h*w*3) sang QPixmap co giữ tỉ lệ."""
+    need = width * height * 3
+    if width <= 0 or height <= 0 or len(bgr_bytes) != need:
+        return None
+    try:
+        bgr = np.frombuffer(bgr_bytes, dtype=np.uint8).reshape((height, width, 3))
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    except Exception:
+        return None
+    rgb = np.ascontiguousarray(rgb)
+    h, w = rgb.shape[:2]
+    qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+    pix = QPixmap.fromImage(qimg)
+    mode = (
+        Qt.TransformationMode.FastTransformation
+        if fast_scale
+        else Qt.TransformationMode.SmoothTransformation
+    )
+    return pix.scaled(
+        max_w,
+        int(max_w * h / w) if w else max_w,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        mode,
+    )
 
 
 class CameraPreviewLabel(QLabel):
@@ -30,7 +69,8 @@ class CameraPreviewLabel(QLabel):
         self.stop()
         self._index = index
         self.setText(f"Đang mở camera {index}…")
-        self._cap = cv2.VideoCapture(index)
+        configure_opencv_logging()
+        self._cap = open_video_capture(index)
         if self._cap is None or not self._cap.isOpened():
             if self._cap is not None:
                 self._cap.release()

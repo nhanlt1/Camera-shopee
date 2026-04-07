@@ -7,3 +7,11 @@ venv/
 dist/
 build/
 *.spec.bak
+
+# Phiên chạy / crash (không commit)
+run_errors.log
+native_crash.txt
+
+# FFmpeg Windows — tải/ghi đặt cục bộ (xem resources/ffmpeg/README.txt)
+resources/ffmpeg/ffmpeg-*/
+resources/ffmpeg/ffmpeg.exe

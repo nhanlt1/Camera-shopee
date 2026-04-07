@@ -26,9 +26,16 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QVBoxLayout,
     QWidget,
+    QMessageBox,
 )
 
-from packrecorder.config import AppConfig, MultiCameraMode, StationConfig, default_stations
+from packrecorder.config import (
+    AppConfig,
+    MultiCameraMode,
+    StationConfig,
+    default_stations,
+    stations_non_serial_decode_collision,
+)
 from packrecorder.ui.camera_preview import CameraPreviewLabel
 
 
@@ -114,6 +121,13 @@ class SettingsDialog(QDialog):
         preview_outer.addWidget(self._preview)
 
         self._ffmpeg = QLineEdit(cfg.ffmpeg_path)
+        self._ffmpeg.setPlaceholderText(
+            r"Để trống nếu ffmpeg đã có trong PATH — hoặc ví dụ C:\ffmpeg\bin\ffmpeg.exe"
+        )
+        self._ffmpeg.setToolTip(
+            "Đường dẫn đầy đủ tới ffmpeg.exe. Nếu để trống: bản build PyInstaller dùng ffmpeg.exe "
+            "kèm cạnh file .exe; bản chạy Python dùng PATH hoặc thư mục thường gặp (Chocolatey, Scoop…)."
+        )
         fb = QPushButton("Chọn ffmpeg…")
         fb.clicked.connect(self._browse_ffmpeg)
 
@@ -142,7 +156,7 @@ class SettingsDialog(QDialog):
         ff_row = QHBoxLayout()
         ff_row.addWidget(self._ffmpeg)
         ff_row.addWidget(fb)
-        common.addRow("ffmpeg (tuỳ chọn)", ff_row)
+        common.addRow("Đường dẫn ffmpeg.exe (tuỳ chọn)", ff_row)
         common.addRow(self._shutdown_on)
         common.addRow("Giờ tắt (HH:MM)", self._shutdown_time)
         common.addRow(self._sound_on)
@@ -166,6 +180,19 @@ class SettingsDialog(QDialog):
 
         self._sync_preview_chrome()
         self._populate_stations_preview_combo()
+
+    def accept(self) -> None:
+        if self._mode_stations.isChecked():
+            stations = self._collect_stations()
+            if stations_non_serial_decode_collision(stations):
+                QMessageBox.warning(
+                    self,
+                    "Trùng camera đọc mã",
+                    "Hai quầy đang cùng «Camera đọc mã» và không dùng máy quét COM.\n"
+                    "Mã quét từ camera chỉ được gán một quầy — hãy sửa trước khi lưu.",
+                )
+                return
+        super().accept()
 
     def dispose_preview(self) -> None:
         self._preview.stop()
@@ -391,15 +418,19 @@ class SettingsDialog(QDialog):
             self._ffmpeg.setText(path)
 
     def _collect_stations(self) -> list[StationConfig]:
+        old_by_id = {s.station_id: s for s in self._cfg.stations}
         out: list[StationConfig] = []
         for pk, rs, ds, sid, _rm in self._station_rows:
             label = pk.text().strip() or "Máy 1"
+            prev = old_by_id.get(sid)
             out.append(
                 StationConfig(
                     sid,
                     label,
                     rs.value(),
                     ds.value(),
+                    scanner_serial_port=prev.scanner_serial_port if prev else "",
+                    scanner_serial_baud=prev.scanner_serial_baud if prev else 9600,
                 )
             )
         return out if out else default_stations()

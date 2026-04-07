@@ -25,6 +25,7 @@ class FFmpegPipeRecorder:
 
     def start(self, output_mp4: Path) -> None:
         output_mp4.parent.mkdir(parents=True, exist_ok=True)
+        # Mobile / Zalo: H.264 yuv420p + main profile; chẵn WxH; moov đầu file (faststart).
         cmd = [
             str(self._ffmpeg),
             "-y",
@@ -38,13 +39,29 @@ class FFmpegPipeRecorder:
             str(self._fps),
             "-i",
             "-",
-            "-an",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            str(output_mp4),
         ]
+        if self._w % 2 or self._h % 2:
+            cmd.extend(
+                ["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"]
+            )
+        cmd.extend(
+            [
+                "-an",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-profile:v",
+                "main",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(output_mp4),
+            ]
+        )
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,

@@ -1,0 +1,26 @@
+Portable Windows (PyInstaller — thư mục, không cần Python trên máy đích)
+================================================================================
+
+Cách build (trên máy dev, Windows 64-bit):
+  - Double-click: scripts\build_portable.bat
+  - Hoặc PowerShell:  .\scripts\build_portable.ps1
+  - Hoặc tay:
+      pip install -e .
+      pip install "pyinstaller>=6.0"
+      pyinstaller packrecorder.spec --noconfirm
+
+Kết quả:  dist\PackRecorder\
+  - PackRecorder.exe  +  toàn bộ DLL/thư viện trong cùng thư mục con (_internal).
+
+Mang sang máy khác:
+  - Nén ZIP cả thư mục dist\PackRecorder (giữ nguyên cấu trúc).
+  - Máy đích: Windows 64-bit, không cần cài Python/pip.
+  - Chạy PackRecorder.exe.
+
+ffmpeg (nén video):
+  - Tùy chọn: đặt ffmpeg.exe vào resources\ffmpeg\ trước khi build → sẽ nằm cạnh .exe.
+  - Không có sẵn: app vẫn chạy; cần ffmpeg trong PATH hoặc chỉ trong Cài đặt.
+
+Lưu ý:
+  - Gói khá lớn (PySide6 + OpenCV). Lần build đầu có thể vài phút.
+  - Nên build trên cùng kiến trúc với máy chạy (thường x64).

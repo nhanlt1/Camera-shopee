@@ -29,11 +29,13 @@ pytest -v
 
 ## Đóng gói (PyInstaller)
 
-Chỉnh đường dẫn `ffmpeg.exe` trong `packrecorder.spec`, rồi:
+Build **gom sẵn `ffmpeg.exe`** vào thư mục `dist/...` (cùng cấp với `PackRecorder.exe`). Khi chạy `pyinstaller`, máy build cần **ffmpeg trong PATH** hoặc đặt biến `PACKRECORDER_FFMPEG` trỏ tới file `ffmpeg.exe`.
 
 ```powershell
 pyinstaller packrecorder.spec
 ```
+
+Bản **onedir** (mặc định trong spec): chạy `dist/PackRecorder/PackRecorder.exe` — khởi động nhanh hơn one-file vì không giải nén `_MEI` mỗi lần. Giữ nguyên cả thư mục `PackRecorder` (gồm `_internal`) khi copy máy khác. Bản có console: `dist/PackRecorder_console/PackRecorder_console.exe`.
 
 ## Troubleshooting camera (spec §9.1–§9.4)
 

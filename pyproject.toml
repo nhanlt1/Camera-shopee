@@ -11,10 +11,13 @@ dependencies = [
   "opencv-python>=4.9.0",
   "pyzbar>=0.1.9",
   "numpy>=1.26.0",
+  "pyserial>=3.5",
+  "pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-qt>=4.4"]
+build = ["pyinstaller>=6.0"]
 
 [project.scripts]
 packrecorder = "packrecorder.__main__:main"

@@ -8,6 +8,8 @@ if not exist ".venv\Scripts\python.exe" (
   pause
   exit /b 1
 )
+echo Kiem tra Pillow (chu tren video)...
+".venv\Scripts\pip" install -q "pillow>=10.0.0" 2>nul
 echo Dang mo Pack Recorder trong cua so rieng...
 start "" /D "%~dp0" "%~dp0.venv\Scripts\python.exe" -m packrecorder
 exit /b 0
