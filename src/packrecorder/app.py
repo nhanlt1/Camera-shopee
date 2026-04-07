@@ -7,9 +7,11 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QTimer
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QMainWindow
 
 from packrecorder.session_log import (
+    append_startup_hints,
     enable_native_crash_dump,
     install_runtime_error_hooks,
     mark_session_phase,
@@ -61,6 +63,20 @@ def _ensure_qt_plugins_frozen() -> None:
         _debug_log("frozen: CANH BAO thieu PySide6/plugins — exe co the tat ngay sau khi chay")
 
 
+def _apply_readable_app_font(app: QApplication) -> None:
+    """Font hệ thống rõ ràng — tránh chữ 'mất' khi QSS/Fusion không gán palette đúng."""
+    f = QFont("Segoe UI", 9)
+    if sys.platform == "win32":
+        if not f.exactMatch():
+            f = QFont("Microsoft YaHei UI", 9)
+        if not f.exactMatch():
+            f = QFont("MS Shell Dlg 2", 9)
+    elif not f.exactMatch():
+        f = QFont()
+        f.setPointSize(9)
+    app.setFont(f)
+
+
 def _windows_bring_to_front(window: QMainWindow) -> None:
     """Dua cua so len truoc (Windows hay de app chay nhung khong nhin thay)."""
     if sys.platform != "win32":
@@ -110,6 +126,7 @@ def run_app() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("PackRecorder")
     app.setStyle("Fusion")
+    _apply_readable_app_font(app)
     qss = Path(__file__).resolve().parent / "ui" / "styles.qss"
     if qss.is_file():
         app.setStyleSheet(qss.read_text(encoding="utf-8"))
@@ -137,11 +154,20 @@ def run_app() -> int:
     def _heartbeat(phase: str) -> None:
         mark_session_phase(phase)
 
-    app.aboutToQuit.connect(
-        lambda: mark_session_phase(
+    def _about_to_quit_dbg() -> None:
+        mark_session_phase(
             "QApplication.aboutToQuit — ứng dụng kết thúc vòng lặp sự kiện."
         )
-    )
+        # region agent log
+        try:
+            from packrecorder.debug_ndjson import dbg
+
+            dbg("H3", "app.run_app.aboutToQuit", "aboutToQuit fired")
+        except Exception:
+            pass
+        # endregion agent log
+
+    app.aboutToQuit.connect(_about_to_quit_dbg)
     QTimer.singleShot(
         400,
         lambda: _heartbeat(
@@ -153,6 +179,7 @@ def run_app() -> int:
         lambda: _heartbeat("Heartbeat ~3s — UI loop vẫn chạy."),
     )
     mark_session_phase("Bắt đầu QApplication.exec().")
+    append_startup_hints()
     t_exec = time.monotonic()
     code = app.exec()
     mark_session_phase(

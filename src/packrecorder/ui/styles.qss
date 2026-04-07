@@ -1,31 +1,104 @@
+/* Fusion + QSS toàn app: trên Windows palette chữ đôi khi trùng nền → ép màu + font */
+
 QMainWindow {
   background: #fafafa;
 }
+
 QMenuBar {
   background: #ffffff;
   padding: 4px;
   border-bottom: 1px solid #e0e0e0;
+  color: #212121;
+  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  font-size: 9pt;
 }
+
+QMenuBar::item {
+  background: transparent;
+  color: #212121;
+}
+
+QMenuBar::item:selected {
+  background: #e3f2fd;
+  color: #212121;
+}
+
 QStatusBar {
   background: #ffffff;
   border-top: 1px solid #e0e0e0;
+  color: #212121;
+  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  font-size: 9pt;
 }
+
 QDialog {
   background: #ffffff;
 }
-QLineEdit, QSpinBox, QComboBox {
+
+QLabel,
+QGroupBox,
+QCheckBox,
+QRadioButton,
+QToolButton {
+  color: #212121;
+  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  font-size: 9pt;
+}
+
+QGroupBox::title {
+  subcontrol-origin: margin;
+  subcontrol-position: top left;
+  padding: 0 4px;
+  color: #212121;
+}
+
+QLineEdit,
+QSpinBox,
+QComboBox {
   padding: 4px 8px;
   border: 1px solid #cfd8dc;
   border-radius: 4px;
   background: #ffffff;
+  color: #212121;
+  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  font-size: 9pt;
 }
+
+QComboBox QAbstractItemView {
+  background: #ffffff;
+  color: #212121;
+  selection-background-color: #e3f2fd;
+  selection-color: #212121;
+}
+
+QListWidget,
+QTreeView,
+QTableView {
+  color: #212121;
+  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  font-size: 9pt;
+}
+
+QMessageBox {
+  background: #ffffff;
+}
+
+QMessageBox QLabel {
+  color: #212121;
+  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  font-size: 9pt;
+}
+
 QPushButton {
   padding: 6px 14px;
   border-radius: 4px;
   background: #1976d2;
   color: #ffffff;
   border: none;
+  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  font-size: 9pt;
 }
+
 QPushButton:hover {
   background: #1565c0;
 }

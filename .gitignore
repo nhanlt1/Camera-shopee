@@ -11,6 +11,7 @@ build/
 # Phiên chạy / crash (không commit)
 run_errors.log
 native_crash.txt
+debug-*.log
 
 # FFmpeg Windows — tải/ghi đặt cục bộ (xem resources/ffmpeg/README.txt)
 resources/ffmpeg/ffmpeg-*/

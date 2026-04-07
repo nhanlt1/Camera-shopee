@@ -14,9 +14,10 @@ def test_first_line_only() -> None:
     assert normalize_manual_order_text("x\ry") == "x"
 
 
-def test_duplicate_halves() -> None:
-    assert normalize_manual_order_text("ABAB") == "AB"
-    assert normalize_manual_order_text("ABCABC") == "ABC"
+def test_repeated_halves_kept_verbatim() -> None:
+    """Không gộp chuỗi dạng AB+AB — mã đơn có thể cố ý lặp pattern."""
+    assert normalize_manual_order_text("ABAB") == "ABAB"
+    assert normalize_manual_order_text("mnbmnb") == "mnbmnb"
 
 
 def test_odd_length_no_dup_fold() -> None:

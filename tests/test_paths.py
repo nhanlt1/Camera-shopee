@@ -28,6 +28,6 @@ def test_build_output_path_includes_packer():
     root = Path("D:/root")
     dt = datetime(2026, 4, 6, 14, 30, 0)
     p = build_output_path(root, "ORD001", "Máy 1", dt)
-    assert p == Path("D:/root/2026-04-06/ORD001_Máy-1_20260406-143000.mp4")
+    assert p == Path("D:/root/2026-04-06/ORD001_Máy-1_2026-04-06_14-30-00.mp4")
     p2 = build_output_path(root, "ORD001", "Nguyễn A", dt)
     assert "Nguyễn-A" in p2.name

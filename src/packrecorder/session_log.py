@@ -12,6 +12,19 @@ from typing import Callable, Iterator, Optional
 
 _LOG_NAME = "run_errors.log"
 
+# Ghi một lần mỗi phiên (append_startup_hints) — mở run_errors.log để xem nhanh.
+STARTUP_HINT_LINES: tuple[str, ...] = (
+    "Gợi ý — độ phân giải: mặc định «Theo webcam»; UI/ghi dùng đúng kích thước khung từ camera. "
+    "Preset HD/VGA chỉ gợi ý cho driver — nếu lệch, app vẫn bám theo buffer thật.",
+    "Gợi ý — vừa cắm webcam: bấm «Làm mới camera & cổng COM»; driver MSMF đôi khi cần 1–2 giây sau khi mở app.",
+    "Gợi ý — log phiên: mỗi lần mở app, run_errors.log ghi lại từ đầu (Tệp → Mở thư mục log lỗi).",
+    "Gợi ý — treo/tắt đột ngột: xem native_crash.txt cùng thư mục với exe hoặc thư mục chạy lệnh.",
+    "Gợi ý — không thấy cửa sổ: Alt+Tab; chạy run_packrecorder.bat / đúp exe từ Explorer thay vì terminal ẩn.",
+    "Gợi ý — quét mã: đặt «Camera đọc mã» đúng góc nhìn mã; hai quầy không nên dùng chung một camera đọc khi không có COM.",
+    "Gợi ý — tắt máy hẹn giờ: nếu bật trong Cài đặt, đến giờ app mở đếm 60s rồi có thể tắt cả Windows; "
+    "mặc định cấu hình mới là tắt tính năng này.",
+)
+
 _session_t0_mono: Optional[float] = None
 _phase_t_mono: Optional[float] = None
 
@@ -66,6 +79,12 @@ def stderr_timing_prefix() -> str:
 def mark_session_phase(label: str) -> None:
     """Ghi mốc INFO vào run_errors (có T+ / Δ+ như mọi dòng)."""
     append_session_log("INFO", label)
+
+
+def append_startup_hints() -> None:
+    """Thêm các dòng gợi ý (HINT) vào run_errors.log cho phiên hiện tại."""
+    for line in STARTUP_HINT_LINES:
+        append_session_log("HINT", line)
 
 
 def append_session_log(
@@ -136,6 +155,17 @@ _hooks_installed = False
 
 def _excepthook(exc_type: type, exc: BaseException, tb: object) -> None:
     try:
+        from packrecorder.debug_ndjson import dbg
+
+        dbg(
+            "H5",
+            "session_log._excepthook",
+            exc_type.__name__,
+            msg_preview=str(exc)[:500],
+        )
+    except Exception:
+        pass
+    try:
         log_session_error(
             f"Ngoại lệ chưa bắt ({exc_type.__name__}): {exc}",
             exc_info=(exc_type, exc, tb),
@@ -156,7 +186,8 @@ def enable_native_crash_dump() -> None:
         faulthandler.enable(fh)
         append_session_log(
             "INFO",
-            f"faulthandler: crash native (SIGSEGV/abort) ghi vào {path.resolve()}",
+            "Đã bật ghi crash native (faulthandler) — chỉ khi thật sự crash C/DLL; "
+            f"file: {path.resolve()}",
         )
     except OSError:
         faulthandler.enable(sys.stderr)

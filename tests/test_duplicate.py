@@ -11,7 +11,7 @@ def test_duplicate_when_prefix_exists(tmp_path: Path):
     day_dir = root / day.isoformat()
     day_dir.mkdir(parents=True)
     oid = sanitize_order_id("DON1")
-    (day_dir / f"{oid}_Máy-1_20260406-120000.mp4").write_bytes(b"")
+    (day_dir / f"{oid}_Máy-1_2026-04-06_12-00-00.mp4").write_bytes(b"")
     assert is_duplicate_order(root, "DON1", day) is True
 
 

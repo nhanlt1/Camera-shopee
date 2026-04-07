@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 _BLUETOOTH_HINTS = (
@@ -40,6 +41,48 @@ def _port_likely_usb_uart(p: Any) -> bool:
     return any(t in desc for t in _USB_NAME_TOKENS)
 
 
+def format_serial_port_label(p: Any) -> str:
+    """Nhãn một dòng: COMx — mô tả Windows + hãng + VID:PID (+ SN ngắn) để phân biệt thiết bị."""
+    dev = (getattr(p, "device", None) or "").strip() or "?"
+    chunks: list[str] = []
+    desc = str(getattr(p, "description", None) or "").strip()
+    if desc:
+        chunks.append(desc)
+    mfr = str(getattr(p, "manufacturer", None) or "").strip()
+    if mfr and mfr.lower() not in desc.lower():
+        chunks.append(mfr)
+    prod = str(getattr(p, "product", None) or "").strip()
+    if prod and prod.lower() not in desc.lower() and prod.lower() != mfr.lower():
+        chunks.append(prod)
+    vid = getattr(p, "vid", None)
+    pid = getattr(p, "pid", None)
+    if isinstance(vid, int) and isinstance(pid, int):
+        chunks.append(f"VID:{vid:04X} PID:{pid:04X}")
+    else:
+        hw = (getattr(p, "hwid", None) or "").strip()
+        if hw and "VID_" in hw.upper():
+            m = re.search(r"VID_([0-9A-F]{4}).*PID_([0-9A-F]{4})", hw, re.I)
+            if m:
+                chunks.append(f"VID:{m.group(1)} PID:{m.group(2)}")
+    sn = getattr(p, "serial_number", None)
+    s = str(sn).strip() if sn is not None else ""
+    if 4 <= len(s) <= 28 and s not in ("None", ""):
+        chunks.append(f"SN:{s}")
+    body = " · ".join(chunks) if chunks else "Serial"
+    return f"{dev} — {body}"
+
+
+def _port_sort_key(p: Any, can_open: bool) -> tuple:
+    """Ưu tiên: mở được (probe) → giống USB UART → không Bluetooth → không Intel AMT → tên cổng."""
+    desc = (getattr(p, "description", None) or "").lower()
+    bt = 1 if any(h in desc for h in _BLUETOOTH_HINTS) else 0
+    skip = 1 if any(s in desc for s in _SKIP_DESC) else 0
+    usb = 1 if _port_likely_usb_uart(p) else 0
+    co = 0 if can_open else 1
+    device = getattr(p, "device", "") or ""
+    return (co, -usb, bt, skip, device)
+
+
 def _try_open_port(device: str) -> bool:
     try:
         import serial
@@ -70,38 +113,36 @@ def iter_raw_comports() -> list[Any]:
 
 
 def list_filtered_serial_ports(*, try_open_ports: bool = True) -> list[tuple[str, str]]:
-    """(device, label) — ưu tiên USB UART.
+    """(device, label) — liệt kê mọi cổng với nhãn đầy đủ; sắp xếp ưu tiên USB/mở được.
 
-    try_open_ports=True: thử mở từng cổng (chậm, dùng khi bấm Làm mới).
-    try_open_ports=False: chỉ heuristic + liệt kê (nhanh khi khởi động UI).
+    try_open_ports=True: thử mở từng cổng (chậm hơn, dùng khi bấm Làm mới).
+    try_open_ports=False: không mở cổng; vẫn lấy tên thiết bị từ hệ điều hành.
     """
     ports = iter_raw_comports()
     if not ports:
         return []
 
-    usbish = [p for p in ports if _port_likely_usb_uart(p)]
-    candidates = usbish if usbish else list(ports)
-    if try_open_ports:
-        opened_ok = [p for p in candidates if _try_open_port(p.device)]
-        chosen = opened_ok if opened_ok else candidates
-    else:
-        chosen = candidates
+    can_open: dict[str, bool] = {}
+    for p in ports:
+        dev = getattr(p, "device", None) or ""
+        if not dev:
+            continue
+        if try_open_ports:
+            can_open[dev] = _try_open_port(dev)
+        else:
+            can_open[dev] = True
+
+    ordered = sorted(
+        ports,
+        key=lambda p: _port_sort_key(p, can_open.get(getattr(p, "device", ""), True)),
+    )
 
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
-    for p in chosen:
-        dev = p.device
-        if dev in seen:
+    for p in ordered:
+        dev = getattr(p, "device", None) or ""
+        if not dev or dev in seen:
             continue
         seen.add(dev)
-        desc = p.description or "Serial"
-        out.append((dev, f"{dev} — {desc}"))
-
-    if not out:
-        for p in ports:
-            if p.device in seen:
-                continue
-            seen.add(p.device)
-            desc = p.description or "Serial"
-            out.append((p.device, f"{p.device} — {desc}"))
+        out.append((dev, format_serial_port_label(p)))
     return out

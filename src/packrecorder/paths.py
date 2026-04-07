@@ -34,5 +34,6 @@ def build_output_path(
     oid = sanitize_order_id(order_id_raw)
     pk = sanitize_packer_label(packer_raw)
     day = day_folder_name(when.date())
-    stamp = when.strftime("%Y%m%d-%H%M%S")
+    # Giống thư mục ngày (YYYY-MM-DD); giờ dùng gạch (Windows cấm ':' trong tên file).
+    stamp = f"{when:%Y-%m-%d}_{when:%H-%M-%S}"
     return root / day / f"{oid}_{pk}_{stamp}.mp4"

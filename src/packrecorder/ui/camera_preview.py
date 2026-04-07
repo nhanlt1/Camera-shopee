@@ -5,6 +5,7 @@ from typing import Optional
 import numpy as np
 
 from packrecorder.opencv_video import configure_opencv_logging, open_video_capture
+from packrecorder.record_resolution import apply_capture_resolution
 
 import cv2
 
@@ -65,7 +66,12 @@ class CameraPreviewLabel(QLabel):
         self._timer.timeout.connect(self._grab_frame)
         self._max_w = 480
 
-    def set_camera_index(self, index: int) -> None:
+    def set_camera_index(
+        self,
+        index: int,
+        *,
+        capture_target_wh: tuple[int, int] | None = None,
+    ) -> None:
         self.stop()
         self._index = index
         self.setText(f"Đang mở camera {index}…")
@@ -77,6 +83,13 @@ class CameraPreviewLabel(QLabel):
                 self._cap = None
             self.setText(f"Không mở được camera {index}")
             return
+        if capture_target_wh is not None:
+            try:
+                apply_capture_resolution(
+                    self._cap, capture_target_wh[0], capture_target_wh[1]
+                )
+            except Exception:
+                pass
         self.setText("")
         self._timer.start(33)
 
