@@ -61,6 +61,26 @@ class MpCameraPipeline:
         self._scanner_started = False
         self._running = False
 
+    @property
+    def context(self) -> mp.context.BaseContext:
+        return self._ctx
+
+    def attach_params_for_writer(
+        self,
+    ) -> Optional[tuple[str, int, int, int, Any, Any, Any]]:
+        """shm_name, full_w, full_h, n_slots, latest_seq, latest_slot, latest_lock."""
+        if self._shm is None or self._shm_name is None:
+            return None
+        return (
+            self._shm_name,
+            self._shm_w,
+            self._shm_h,
+            self._n_slots,
+            self._latest_seq,
+            self._latest_slot,
+            self._latest_lock,
+        )
+
     def start(self) -> None:
         if self._running:
             return

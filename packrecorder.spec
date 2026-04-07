@@ -76,6 +76,8 @@ hiddenimports += [
     "packrecorder.ipc.scanner_worker",
     "packrecorder.ipc.pipeline",
     "packrecorder.ipc.frame_ring",
+    "packrecorder.ipc.encode_writer_worker",
+    "packrecorder.ipc.subprocess_recorder",
 ]
 
 a = Analysis(

@@ -60,7 +60,9 @@ from packrecorder.record_resolution import (
 from packrecorder.pip_composite import composite_pip_bgr
 from packrecorder.retention import purge_old_day_folders
 from packrecorder.session_log import log_session_error, mark_session_phase, session_log_path
+from packrecorder.ipc.encode_writer_worker import mp_encode_writer_entry
 from packrecorder.ipc.pipeline import MpCameraPipeline
+from packrecorder.ipc.subprocess_recorder import SubprocessRecordingHandle
 from packrecorder.scan_worker import ScanWorker
 from packrecorder.serial_scan_worker import SerialScanWorker
 from packrecorder.shutdown_scheduler import compute_next_shutdown_at
@@ -172,7 +174,9 @@ class MainWindow(QMainWindow):
         self._rtsp_error_shown: set[int] = set()
 
         self._order_sm: dict[str, OrderStateMachine] = {}
-        self._recorders: dict[str, FFmpegPipeRecorder | None] = {}
+        self._recorders: dict[
+            str, FFmpegPipeRecorder | SubprocessRecordingHandle | None
+        ] = {}
         self._station_recording_order: dict[str, str] = {}
         self._recording_started_at: dict[str, datetime] = {}
         self._camera_probe_busy = False
@@ -1221,6 +1225,8 @@ class MainWindow(QMainWindow):
         for sid, rec in list(self._recorders.items()):
             if rec is None or sid == "pip":
                 continue
+            if isinstance(rec, SubprocessRecordingHandle):
+                continue
             nxt = self._recording_next_emit_mono.get(sid)
             if nxt is None:
                 continue
@@ -1388,24 +1394,71 @@ class MainWindow(QMainWindow):
         out = build_output_path(
             root, order, st.packer_label, datetime.now()
         )
-        rec = FFmpegPipeRecorder(
-            ff,
-            w,
-            h,
-            fps_out,
-            codec_preference=self._config.record_video_codec,
-            bitrate_kbps=self._config.record_video_bitrate_kbps,
-            h264_crf=self._config.record_h264_crf,
+        t0 = datetime.now()
+        row = self._station_row_index(st)
+        rec_cam = station_record_cam_id(st, row)
+        pl = self._mp_pipelines.get(rec_cam)
+        writer_params = (
+            pl.attach_params_for_writer()
+            if pl is not None and self._config.use_multiprocessing_camera_pipeline
+            else None
         )
-        try:
-            rec.start(out)
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, "Không bắt đầu ghi được", str(e))
-            self._order_sm[station_id] = OrderStateMachine()
-            return
-        self._recorders[station_id] = rec
-        self._recording_started_at[station_id] = datetime.now()
-        t0 = self._recording_started_at[station_id]
+        use_subproc_writer = (
+            writer_params is not None
+            and self._config.multi_camera_mode != "pip"
+        )
+        if use_subproc_writer:
+            assert pl is not None
+            shm_name, fw, fh, n_sl, lseq, lslot, llock = writer_params
+            try:
+                handle = SubprocessRecordingHandle.start_encoder(
+                    pl.context,
+                    mp_encode_writer_entry,
+                    (
+                        shm_name,
+                        fw,
+                        fh,
+                        n_sl,
+                        lseq,
+                        lslot,
+                        llock,
+                        st.record_roi_norm,
+                        order,
+                        st.packer_label,
+                        t0.isoformat(),
+                        str(ff),
+                        str(out),
+                        fps_out,
+                        str(self._config.record_video_codec),
+                        int(self._config.record_video_bitrate_kbps),
+                        int(self._config.record_h264_crf),
+                        w,
+                        h,
+                    ),
+                )
+            except OSError as e:
+                QMessageBox.warning(self, "Không bắt đầu ghi được", str(e))
+                self._order_sm[station_id] = OrderStateMachine()
+                return
+            self._recorders[station_id] = handle
+        else:
+            rec = FFmpegPipeRecorder(
+                ff,
+                w,
+                h,
+                fps_out,
+                codec_preference=self._config.record_video_codec,
+                bitrate_kbps=self._config.record_video_bitrate_kbps,
+                h264_crf=self._config.record_h264_crf,
+            )
+            try:
+                rec.start(out)
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.warning(self, "Không bắt đầu ghi được", str(e))
+                self._order_sm[station_id] = OrderStateMachine()
+                return
+            self._recorders[station_id] = rec
+        self._recording_started_at[station_id] = t0
         self._recording_burnin[station_id] = RecordingBurnIn(
             order, st.packer_label, t0
         )
