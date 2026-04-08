@@ -152,11 +152,15 @@ class SettingsDialog(QDialog):
         vf = QFormLayout(vid_box)
         vf.addRow("Giữ video tối đa (ngày), sau đó xóa thư mục ngày cũ", self._retention)
 
-        ha_box = QGroupBox("Lưu trữ dự phòng & heartbeat")
+        ha_box = QGroupBox("Ổ dự phòng và trạng thái máy")
+        ha_box.setToolTip(
+            "Ổ dự phòng: lưu video khi ổ chính (ví dụ Drive) lỗi. "
+            "File trạng thái (heartbeat): máy phụ đọc để biết máy quay còn «sống» không."
+        )
         hf = QFormLayout(ha_box)
-        hf.addRow("Thư mục backup (local)", backup_row)
-        hf.addRow("File status.json (máy phụ — theo dõi)", rs_row)
-        hf.addRow("Đường tương đối status (máy ghi)", self._status_rel)
+        hf.addRow("Thư mục dự phòng (máy quay)", backup_row)
+        hf.addRow("File theo dõi trạng thái (máy phụ)", rs_row)
+        hf.addRow("Vị trí file trạng thái trên máy quay", self._status_rel)
 
         self._beep_short = QSpinBox()
         self._beep_short.setRange(20, 2000)

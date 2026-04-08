@@ -102,3 +102,66 @@ QPushButton {
 QPushButton:hover {
   background: #1565c0;
 }
+
+/* Bảng trong dialog (QTableWidget) — tránh nền/vùng header đen trên Windows */
+QTableWidget {
+  background: #ffffff;
+  alternate-background-color: #fafafa;
+  color: #212121;
+  gridline-color: #e0e0e0;
+  selection-background-color: #e3f2fd;
+  selection-color: #212121;
+  border: 1px solid #cfd8dc;
+  border-radius: 4px;
+}
+
+QTableWidget::item {
+  padding: 4px;
+  color: #212121;
+  background: #ffffff;
+}
+
+QTableWidget::item:alternate {
+  background: #fafafa;
+}
+
+QTableWidget::item:selected {
+  background: #e3f2fd;
+  color: #212121;
+}
+
+QHeaderView::section {
+  background: #f5f5f5;
+  color: #212121;
+  padding: 6px 8px;
+  border: 1px solid #e0e0e0;
+  font-weight: bold;
+}
+
+QTableCornerButton::section {
+  background: #f5f5f5;
+  border: 1px solid #e0e0e0;
+}
+
+QDateEdit {
+  padding: 4px 8px;
+  border: 1px solid #cfd8dc;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #212121;
+  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  font-size: 9pt;
+}
+
+QCalendarWidget QWidget#qt_calendar_navigationbar,
+QCalendarWidget QAbstractItemView {
+  background: #ffffff;
+  color: #212121;
+}
+
+QCalendarWidget QAbstractItemView:enabled {
+  color: #212121;
+  background: #ffffff;
+  selection-background-color: #1976d2;
+  selection-color: #ffffff;
+}

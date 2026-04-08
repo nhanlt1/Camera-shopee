@@ -290,9 +290,11 @@ class MainWindow(QMainWindow):
         )
         act_log.triggered.connect(self._open_error_log_folder)
         m_settings.addAction(act_log)
-        act_search = QAction("Tìm kiếm video…", self)
+
+        m_search = self.menuBar().addMenu("Tìm kiếm")
+        act_search = QAction("Danh sách video đã ghi…", self)
         act_search.triggered.connect(self._open_recording_search)
-        m_settings.addAction(act_search)
+        m_search.addAction(act_search)
 
         self._purge_timer = QTimer(self)
         self._purge_timer.timeout.connect(self._run_retention)
@@ -857,7 +859,7 @@ class MainWindow(QMainWindow):
             db_path, self._config.sync_worker_interval_ms, self
         )
         self._sync_worker.sync_failed.connect(
-            lambda m: self._status.showMessage(f"Đồng bộ backup: {m}", 10_000)
+            lambda m: self._status.showMessage(f"Đưa video lên ổ chính: {m}", 10_000)
         )
         self._sync_worker.start()
 
@@ -882,17 +884,17 @@ class MainWindow(QMainWindow):
         br = (self._config.video_backup_root or "").strip()
         if br:
             if bo:
-                self._sync_indicator.setText("JSON OK (backup)")
+                self._sync_indicator.setText("Đồng bộ: ổn (cả ổ dự phòng)")
                 self._sync_indicator.setStyleSheet("color:#2e7d32;font-weight:bold;")
             else:
-                self._sync_indicator.setText("JSON lỗi backup")
+                self._sync_indicator.setText("Cảnh báo: không ghi được file trạng thái (ổ dự phòng)")
                 self._sync_indicator.setStyleSheet("color:#c62828;font-weight:bold;")
         else:
             if po:
-                self._sync_indicator.setText("JSON OK")
+                self._sync_indicator.setText("Đồng bộ: ổn")
                 self._sync_indicator.setStyleSheet("color:#2e7d32;font-weight:bold;")
             else:
-                self._sync_indicator.setText("JSON lỗi")
+                self._sync_indicator.setText("Cảnh báo: không ghi được file trạng thái")
                 self._sync_indicator.setStyleSheet("color:#c62828;font-weight:bold;")
 
     def _on_heartbeat_timer(self) -> None:
