@@ -1,7 +1,7 @@
 # Thiết kế: Hàng đợi giới hạn cho máy quét COM (cách 1)
 
 **Ngày:** 2026-04-08  
-**Trạng thái:** Đã duyệt ý tưởng — chờ triển khai (theo plan riêng)
+**Trạng thái:** Đã triển khai trong code (`serial_scan_worker.py`, `tests/test_serial_scan_queue.py`)
 
 ## Bối cảnh
 
@@ -59,6 +59,6 @@
 
 ## Tiêu chí xong
 
-- [ ] `SerialScanWorker` (hoặc module kèm) có queue giới hạn + policy đầy queue như trên.
-- [ ] Dừng app / đổi cấu hình không còn thread đọc COM zombie.
-- [ ] Hành vi người dùng với một máy quét bình thường không đổi so với trước (cùng debounce ý nghĩa nghiệp vụ).
+- [x] `SerialScanWorker` có `queue.Queue(maxsize=SERIAL_SCAN_QUEUE_MAX)` + bỏ bản cũ khi đầy + log WARNING có giới hạn tần suất.
+- [x] Dừng: `stop_worker()` đóng cổng serial (mở khóa `readline`) + `join` luồng đọc.
+- [x] Debounce giữ như trước khi `put` vào queue; hành vi quét bình thường không đổi.
