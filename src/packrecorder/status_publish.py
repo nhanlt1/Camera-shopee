@@ -1,23 +1,30 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
-
-import psutil
 
 from packrecorder.config import AppConfig
 
 
 def disk_usage_for_path(path: Path) -> dict[str, float]:
-    p = str(path.resolve())
-    u = psutil.disk_usage(p)
+    """Dùng shutil.disk_usage (stdlib) — không cần psutil; tránh lỗi khi chưa pip install deps."""
+    p = path.resolve()
+    try:
+        if not p.exists():
+            p.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        p = Path.cwd()
+    u = shutil.disk_usage(str(p))
     gb = 1024**3
+    total = max(1, int(u.total))
+    pct = 100.0 * float(u.used) / float(total)
     return {
         "total_gb": round(u.total / gb, 2),
         "used_gb": round(u.used / gb, 2),
         "free_gb": round(u.free / gb, 2),
-        "percent": float(u.percent),
+        "percent": round(pct, 2),
     }
 
 
