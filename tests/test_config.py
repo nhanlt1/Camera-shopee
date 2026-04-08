@@ -43,6 +43,22 @@ def test_save_load(tmp_path: Path):
     assert c2.packer_label == "Máy 2"
 
 
+def test_ha_fields_roundtrip(tmp_path: Path) -> None:
+    p = tmp_path / "c.json"
+    c = AppConfig(
+        video_root=str(tmp_path / "v"),
+        video_retention_keep_days=30,
+        video_backup_root=str(tmp_path / "bak"),
+        remote_status_json_path="Z:/Drive/status.json",
+        status_json_relative="PackRecorder/status.json",
+    )
+    save_config(p, c)
+    c2 = load_config(p)
+    assert c2.video_retention_keep_days == 30
+    assert c2.video_backup_root == str(tmp_path / "bak")
+    assert c2.remote_status_json_path == "Z:/Drive/status.json"
+
+
 def test_record_roi_norm_roundtrip(tmp_path: Path):
     p = tmp_path / "c.json"
     roi = (0.1, 0.2, 0.5, 0.45)

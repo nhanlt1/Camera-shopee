@@ -13,11 +13,13 @@ dependencies = [
   "numpy>=1.26.0",
   "pyserial>=3.5",
   "pillow>=10.0.0",
+  "psutil>=5.9.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-qt>=4.4"]
 build = ["pyinstaller>=6.0"]
+admin = ["fastapi>=0.110", "uvicorn>=0.27"]
 
 [project.scripts]
 packrecorder = "packrecorder.__main__:main"

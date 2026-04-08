@@ -78,6 +78,13 @@ hiddenimports += [
     "packrecorder.ipc.frame_ring",
     "packrecorder.ipc.encode_writer_worker",
     "packrecorder.ipc.subprocess_recorder",
+    "psutil",
+    "packrecorder.storage_resolver",
+    "packrecorder.recording_index",
+    "packrecorder.status_publish",
+    "packrecorder.sync_worker",
+    "packrecorder.heartbeat_consumer",
+    "packrecorder.ui.recording_search_dialog",
 ]
 
 a = Analysis(

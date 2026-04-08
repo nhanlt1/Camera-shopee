@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import replace
 from datetime import date, datetime, time as time_cls
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from PySide6.QtCore import QEvent, QPointF, Qt, QTimer, QUrl
@@ -51,7 +52,12 @@ from packrecorder.ffmpeg_pipe_recorder import FFmpegPipeRecorder
 from packrecorder.feedback_sound import FeedbackPlayer
 from packrecorder.order_input import normalize_manual_order_text
 from packrecorder.order_state import OrderStateMachine, ScanResult
+from packrecorder.heartbeat_consumer import office_heartbeat_state
 from packrecorder.paths import build_output_path
+from packrecorder.recording_index import RecordingIndex, open_recording_index
+from packrecorder.status_publish import publish_status_json
+from packrecorder.storage_resolver import choose_write_root
+from packrecorder.sync_worker import BackupSyncWorker
 from packrecorder.record_roi import norm_to_pixels
 from packrecorder.record_resolution import (
     PRESET_LABELS_VI,
@@ -70,6 +76,7 @@ from packrecorder.serial_scan_worker import SerialScanWorker
 from packrecorder.shutdown_scheduler import compute_next_shutdown_at
 from packrecorder.ui.countdown_dialog import ShutdownCountdownDialog
 from packrecorder.ui.dual_station_widget import DualStationWidget
+from packrecorder.ui.recording_search_dialog import RecordingSearchDialog
 from packrecorder.ui.settings_dialog import SettingsDialog
 from packrecorder.video_overlay import (
     RecordingBurnIn,
@@ -202,6 +209,11 @@ class MainWindow(QMainWindow):
         self._recording_emit_fps: dict[str, int] = {}
         self._recording_frame_wh: dict[str, tuple[int, int]] = {}
         self._recording_burnin: dict[str, RecordingBurnIn] = {}
+        self._recording_write_meta: dict[str, dict[str, Any]] = {}
+        self._recording_index: RecordingIndex | None = None
+        self._index_degraded = False
+        self._sync_worker: BackupSyncWorker | None = None
+        self._office_search_stale = False
 
         self._status = QStatusBar()
         self.setStatusBar(self._status)
@@ -212,6 +224,9 @@ class MainWindow(QMainWindow):
         self._chip = QLabel("Chờ quét mã đơn")
         self._chip.setStyleSheet(_CHIP_IDLE_STYLE)
         self.statusBar().addPermanentWidget(self._chip)
+        self._sync_indicator = QLabel("")
+        self._sync_indicator.setMinimumWidth(160)
+        self.statusBar().addPermanentWidget(self._sync_indicator)
 
         self._stack = QStackedWidget()
         self._dual_panel = DualStationWidget()
@@ -275,11 +290,24 @@ class MainWindow(QMainWindow):
         )
         act_log.triggered.connect(self._open_error_log_folder)
         m_settings.addAction(act_log)
+        act_search = QAction("Tìm kiếm video…", self)
+        act_search.triggered.connect(self._open_recording_search)
+        m_settings.addAction(act_search)
 
         self._purge_timer = QTimer(self)
         self._purge_timer.timeout.connect(self._run_retention)
         self._purge_timer.start(3 * 60 * 60 * 1000)
         QTimer.singleShot(0, self._run_retention)
+
+        self._heartbeat_timer = QTimer(self)
+        self._heartbeat_timer.timeout.connect(self._on_heartbeat_timer)
+        self._heartbeat_timer.start(max(5_000, int(self._config.heartbeat_interval_ms)))
+        self._office_hb_timer = QTimer(self)
+        self._office_hb_timer.timeout.connect(self._on_office_heartbeat_poll)
+        self._restart_office_heartbeat_timer()
+
+        self._try_open_recording_index()
+        self._restart_sync_worker()
 
         self._shutdown_timer = QTimer(self)
         self._shutdown_timer.timeout.connect(self._check_shutdown)
@@ -790,10 +818,164 @@ class MainWindow(QMainWindow):
         self._cleanup_workers()
 
     def _run_retention(self) -> None:
-        root = Path(self._config.video_root)
-        if not root.is_dir():
+        keep = max(0, int(self._config.video_retention_keep_days))
+        if keep <= 0:
             return
-        purge_old_day_folders(root, 16, date.today())
+        root = Path(self._config.video_root)
+        if root.is_dir():
+            purge_old_day_folders(root, keep, date.today())
+        br = (self._config.video_backup_root or "").strip()
+        if br:
+            bp = Path(br)
+            if bp.is_dir():
+                purge_old_day_folders(bp, keep, date.today())
+
+    def _try_open_recording_index(self) -> None:
+        self._close_recording_index()
+        try:
+            self._recording_index, self._index_degraded = open_recording_index(self._config)
+        except OSError:
+            self._recording_index = None
+            self._index_degraded = True
+
+    def _close_recording_index(self) -> None:
+        if self._recording_index is not None:
+            self._recording_index.close()
+            self._recording_index = None
+
+    def _restart_sync_worker(self) -> None:
+        if self._sync_worker is not None:
+            self._sync_worker.stop_worker()
+            self._sync_worker.wait(4000)
+            self._sync_worker = None
+        if not (self._config.video_backup_root or "").strip():
+            return
+        if self._recording_index is None:
+            return
+        db_path = self._recording_index.db_path
+        self._sync_worker = BackupSyncWorker(
+            db_path, self._config.sync_worker_interval_ms, self
+        )
+        self._sync_worker.sync_failed.connect(
+            lambda m: self._status.showMessage(f"Đồng bộ backup: {m}", 10_000)
+        )
+        self._sync_worker.start()
+
+    def _restart_office_heartbeat_timer(self) -> None:
+        self._office_hb_timer.stop()
+        if (self._config.remote_status_json_path or "").strip():
+            self._office_hb_timer.start(
+                max(5_000, int(self._config.office_heartbeat_poll_ms))
+            )
+            QTimer.singleShot(0, self._on_office_heartbeat_poll)
+
+    def _publish_status_json_core(self) -> tuple[bool, bool] | None:
+        vr = (self._config.video_root or "").strip()
+        br = (self._config.video_backup_root or "").strip()
+        if not vr and not br:
+            return None
+        return publish_status_json(
+            self._config, index_degraded=self._index_degraded
+        )
+
+    def _apply_publisher_sync_label(self, po: bool, bo: bool) -> None:
+        br = (self._config.video_backup_root or "").strip()
+        if br:
+            if bo:
+                self._sync_indicator.setText("JSON OK (backup)")
+                self._sync_indicator.setStyleSheet("color:#2e7d32;font-weight:bold;")
+            else:
+                self._sync_indicator.setText("JSON lỗi backup")
+                self._sync_indicator.setStyleSheet("color:#c62828;font-weight:bold;")
+        else:
+            if po:
+                self._sync_indicator.setText("JSON OK")
+                self._sync_indicator.setStyleSheet("color:#2e7d32;font-weight:bold;")
+            else:
+                self._sync_indicator.setText("JSON lỗi")
+                self._sync_indicator.setStyleSheet("color:#c62828;font-weight:bold;")
+
+    def _on_heartbeat_timer(self) -> None:
+        r = self._publish_status_json_core()
+        if r is None:
+            return
+        po, bo = r
+        if (self._config.remote_status_json_path or "").strip():
+            return
+        self._apply_publisher_sync_label(po, bo)
+
+    def _on_office_heartbeat_poll(self) -> None:
+        path = (self._config.remote_status_json_path or "").strip()
+        if not path:
+            return
+        p = Path(path)
+        age = 1e9
+        if p.is_file():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                lh = str(data.get("last_heartbeat") or "")
+                ts = datetime.fromisoformat(lh)
+                age = max(0.0, (datetime.now() - ts.replace(tzinfo=None)).total_seconds())
+            except (ValueError, TypeError, OSError, json.JSONDecodeError):
+                age = 1e9
+        light, msg, stale = office_heartbeat_state(
+            age,
+            fresh_s=int(self._config.heartbeat_fresh_seconds),
+            stale_s=int(self._config.heartbeat_stale_seconds),
+        )
+        self._office_search_stale = stale
+        colors = {"green": "#2e7d32", "yellow": "#f9a825", "red": "#c62828"}
+        short = msg if len(msg) <= 100 else msg[:97] + "…"
+        self._sync_indicator.setText(short)
+        self._sync_indicator.setStyleSheet(
+            f"color: {colors.get(light, '#333')};font-weight:bold;"
+        )
+
+    def _heartbeat_after_recording(self) -> None:
+        r = self._publish_status_json_core()
+        if r is None:
+            return
+        po, bo = r
+        if (self._config.remote_status_json_path or "").strip():
+            return
+        self._apply_publisher_sync_label(po, bo)
+
+    def _finalize_saved_recording(self, station_id: str) -> None:
+        meta = self._recording_write_meta.pop(station_id, None)
+        if meta is None:
+            self._heartbeat_after_recording()
+            return
+        if self._recording_index is None:
+            self._try_open_recording_index()
+        if self._recording_index is None:
+            self._heartbeat_after_recording()
+            return
+        primary_root = str(Path(self._config.video_root).resolve())
+        backup_opt = (self._config.video_backup_root or "").strip()
+        st_s = "synced" if meta["tag"] == "primary" else "pending_upload"
+        try:
+            self._recording_index.insert(
+                order_id=meta["order"],
+                packer=meta["packer"],
+                rel_key=meta["rel_key"],
+                storage_status=st_s,
+                primary_root=primary_root,
+                backup_root=backup_opt or None,
+                resolved_path=str(Path(meta["out"]).resolve()),
+                created_at=meta["started"],
+            )
+        except OSError as e:
+            log_session_error(f"recording_index.insert failed: {e}")
+        self._heartbeat_after_recording()
+
+    def _open_recording_search(self) -> None:
+        self._note_user_activity()
+        dlg = RecordingSearchDialog(
+            self._config,
+            office_search_stale=self._office_search_stale,
+            parent=self,
+        )
+        dlg.exec()
 
     def _required_camera_indices(self) -> set[int]:
         if self._config.multi_camera_mode == "single":
@@ -1420,8 +1602,15 @@ class MainWindow(QMainWindow):
         st = self._station_by_id(station_id)
         if st is None:
             return
-        root = Path(self._config.video_root)
-        root.mkdir(parents=True, exist_ok=True)
+        primary = Path(self._config.video_root)
+        bo = (self._config.video_backup_root or "").strip()
+        backup = Path(bo) if bo else None
+        try:
+            write_root, wtag = choose_write_root(primary, backup)
+        except OSError as e:
+            QMessageBox.warning(self, "Lưu trữ", str(e))
+            self._order_sm[station_id] = OrderStateMachine()
+            return
         try:
             ff = _resolve_ffmpeg(self._config)
         except FileNotFoundError:
@@ -1430,10 +1619,17 @@ class MainWindow(QMainWindow):
             return
         w, h = self._recording_dims_for_station(st)
         fps_out = max(1, min(60, int(self._config.record_fps)))
-        out = build_output_path(
-            root, order, st.packer_label, datetime.now()
-        )
         t0 = datetime.now()
+        out = build_output_path(write_root, order, st.packer_label, t0)
+        rel_key = out.relative_to(write_root).as_posix()
+        meta = {
+            "order": order,
+            "packer": st.packer_label,
+            "out": out,
+            "rel_key": rel_key,
+            "tag": wtag,
+            "started": t0.isoformat(timespec="seconds"),
+        }
         row = self._station_row_index(st)
         rec_cam = station_record_cam_id(st, row)
         pl = self._mp_pipelines.get(rec_cam)
@@ -1480,6 +1676,7 @@ class MainWindow(QMainWindow):
                 self._order_sm[station_id] = OrderStateMachine()
                 return
             self._recorders[station_id] = handle
+            self._recording_write_meta[station_id] = meta
         else:
             rec = FFmpegPipeRecorder(
                 ff,
@@ -1497,6 +1694,7 @@ class MainWindow(QMainWindow):
                 self._order_sm[station_id] = OrderStateMachine()
                 return
             self._recorders[station_id] = rec
+            self._recording_write_meta[station_id] = meta
         self._recording_started_at[station_id] = t0
         self._recording_burnin[station_id] = RecordingBurnIn(
             order, st.packer_label, t0
@@ -1525,17 +1723,34 @@ class MainWindow(QMainWindow):
         self._refresh_preview_roi_locks()
 
     def _begin_recording_pip(self, order: str) -> None:
-        root = Path(self._config.video_root)
-        root.mkdir(parents=True, exist_ok=True)
+        primary = Path(self._config.video_root)
+        bo = (self._config.video_backup_root or "").strip()
+        backup = Path(bo) if bo else None
+        try:
+            write_root, wtag = choose_write_root(primary, backup)
+        except OSError as e:
+            QMessageBox.warning(self, "Lưu trữ", str(e))
+            self._order_sm["pip"] = OrderStateMachine()
+            return
         try:
             ff = _resolve_ffmpeg(self._config)
         except FileNotFoundError:
             self._show_ffmpeg_missing_dialog()
             self._order_sm["pip"] = OrderStateMachine()
             return
+        t0 = datetime.now()
         out = build_output_path(
-            root, order, self._config.packer_label, datetime.now()
+            write_root, order, self._config.packer_label, t0
         )
+        rel_key = out.relative_to(write_root).as_posix()
+        meta = {
+            "order": order,
+            "packer": self._config.packer_label,
+            "out": out,
+            "rel_key": rel_key,
+            "tag": wtag,
+            "started": t0.isoformat(timespec="seconds"),
+        }
         fps_out = max(1, min(60, int(self._config.record_fps)))
         rec = FFmpegPipeRecorder(
             ff,
@@ -1553,8 +1768,8 @@ class MainWindow(QMainWindow):
             self._order_sm["pip"] = OrderStateMachine()
             return
         self._recorders["pip"] = rec
-        self._recording_started_at["pip"] = datetime.now()
-        t0 = self._recording_started_at["pip"]
+        self._recording_write_meta["pip"] = meta
+        self._recording_started_at["pip"] = t0
         self._recording_burnin["pip"] = RecordingBurnIn(
             order, self._config.packer_label, t0
         )
@@ -1582,6 +1797,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self._recorders[station_id] = None
+        self._finalize_saved_recording(station_id)
         self._maybe_stop_record_pace_timer()
         self._station_recording_order.pop(station_id, None)
         self._recording_started_at.pop(station_id, None)
@@ -1623,6 +1839,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self._recorders[station_id] = None
+        self._finalize_saved_recording(station_id)
         self._maybe_stop_record_pace_timer()
         self._station_recording_order.pop(station_id, None)
         self._recording_started_at.pop(station_id, None)
@@ -1719,6 +1936,17 @@ class MainWindow(QMainWindow):
                 self._config = normalize_config(self._config)
                 save_config(self._config_path, self._config)
                 self._feedback.update_config(self._config)
+                self._heartbeat_timer.setInterval(
+                    max(5_000, int(self._config.heartbeat_interval_ms))
+                )
+                self._restart_office_heartbeat_timer()
+                if self._sync_worker is not None:
+                    self._sync_worker.stop_worker()
+                    self._sync_worker.wait(4000)
+                    self._sync_worker = None
+                self._close_recording_index()
+                self._try_open_recording_index()
+                self._restart_sync_worker()
                 self._refresh_next_shutdown()
                 self._rebuild_order_machines()
                 self._update_packer_message()
@@ -1778,6 +2006,11 @@ class MainWindow(QMainWindow):
                 app.removeEventFilter(self)
             except Exception:
                 pass
+        if self._sync_worker is not None:
+            self._sync_worker.stop_worker()
+            self._sync_worker.wait(4000)
+            self._sync_worker = None
+        self._close_recording_index()
         mark_session_phase(
             "MainWindow.closeEvent — cửa sổ chính đóng (thường: bấm X / Alt+F4; "
             "hoặc môi trường chạy kết thúc tiến trình; không phải lỗi nếu bạn chủ động thoát)."

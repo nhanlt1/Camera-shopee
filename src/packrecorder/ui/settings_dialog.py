@@ -122,6 +122,42 @@ class SettingsDialog(QDialog):
             "Ghi FFmpeg vẫn ở tiến trình chính. Tắt nếu gặp lỗi hoặc treo khi mở camera."
         )
 
+        self._retention = QSpinBox()
+        self._retention.setRange(0, 3650)
+        self._retention.setValue(int(cfg.video_retention_keep_days))
+        self._retention.setToolTip(
+            "Số ngày giữ thư mục quay theo YYYY-MM-DD trong thư mục gốc (và backup nếu có); "
+            "0 = tắt tự xóa."
+        )
+        self._backup_root = QLineEdit(cfg.video_backup_root)
+        self._backup_root.setPlaceholderText("Ổ dự phòng khi Drive/Primary lỗi (tuỳ chọn)")
+        br_btn = QPushButton("Chọn…")
+        br_btn.clicked.connect(self._browse_backup)
+        backup_row = QHBoxLayout()
+        backup_row.addWidget(self._backup_root)
+        backup_row.addWidget(br_btn)
+        self._remote_status = QLineEdit(cfg.remote_status_json_path)
+        self._remote_status.setPlaceholderText(
+            "Máy phụ: đường đầy đủ tới status.json (Drive map hoặc UNC)"
+        )
+        rs_btn = QPushButton("Chọn…")
+        rs_btn.clicked.connect(self._browse_remote_status)
+        rs_row = QHBoxLayout()
+        rs_row.addWidget(self._remote_status)
+        rs_row.addWidget(rs_btn)
+        self._status_rel = QLineEdit(cfg.status_json_relative)
+        self._status_rel.setPlaceholderText("PackRecorder/status.json")
+
+        vid_box = QGroupBox("Quản lý video")
+        vf = QFormLayout(vid_box)
+        vf.addRow("Giữ video tối đa (ngày), sau đó xóa thư mục ngày cũ", self._retention)
+
+        ha_box = QGroupBox("Lưu trữ dự phòng & heartbeat")
+        hf = QFormLayout(ha_box)
+        hf.addRow("Thư mục backup (local)", backup_row)
+        hf.addRow("File status.json (máy phụ — theo dõi)", rs_row)
+        hf.addRow("Đường tương đối status (máy ghi)", self._status_rel)
+
         self._beep_short = QSpinBox()
         self._beep_short.setRange(20, 2000)
         self._beep_short.setValue(cfg.beep_short_ms)
@@ -158,6 +194,8 @@ class SettingsDialog(QDialog):
         outer.addWidget(mode_box)
         outer.addWidget(self._stack)
         outer.addLayout(common)
+        outer.addWidget(vid_box)
+        outer.addWidget(ha_box)
         outer.addWidget(buttons)
 
     def accept(self) -> None:
@@ -302,6 +340,23 @@ class SettingsDialog(QDialog):
         if path:
             self._ffmpeg.setText(path)
 
+    def _browse_backup(self) -> None:
+        d = QFileDialog.getExistingDirectory(
+            self, "Thư mục backup video", self._backup_root.text()
+        )
+        if d:
+            self._backup_root.setText(d)
+
+    def _browse_remote_status(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Chọn status.json",
+            self._remote_status.text() or "",
+            "JSON (*.json);;Mọi file (*.*)",
+        )
+        if path:
+            self._remote_status.setText(path)
+
     def _collect_stations(self) -> list[StationConfig]:
         old_by_id = {s.station_id: s for s in self._cfg.stations}
         out: list[StationConfig] = []
@@ -332,6 +387,7 @@ class SettingsDialog(QDialog):
 
         sound_mode = "speaker" if self._sound_mode.currentIndex() == 0 else "scanner_host"
 
+        rel_status = self._status_rel.text().strip() or "PackRecorder/status.json"
         base = replace(
             self._cfg,
             video_root=self._root.text().strip(),
@@ -354,6 +410,10 @@ class SettingsDialog(QDialog):
             pip_decode_camera_index=self._pip_decode.value(),
             pip_overlay_max_width=self._pip_ow.value(),
             pip_overlay_margin=self._pip_mg.value(),
+            video_retention_keep_days=int(self._retention.value()),
+            video_backup_root=self._backup_root.text().strip(),
+            remote_status_json_path=self._remote_status.text().strip(),
+            status_json_relative=rel_status,
         )
         if self._mode_pip.isChecked():
             base = replace(

@@ -57,7 +57,7 @@ def station_record_cam_id(st: StationConfig, station_index: int) -> int:
 
 @dataclass
 class AppConfig:
-    schema_version: int = 5
+    schema_version: int = 6
     video_root: str = ""
     camera_index: int = 0
     packer_label: str = "Máy 1"
@@ -98,6 +98,18 @@ class AppConfig:
     window_always_on_top: bool = True
     # Capture + pyzbar trong multiprocessing + SharedMemory (Windows spawn); tắt = luồng QThread cũ.
     use_multiprocessing_camera_pipeline: bool = False
+    # HA / heartbeat / tìm kiếm (plan 2026-04-08)
+    video_backup_root: str = ""
+    status_json_relative: str = "PackRecorder/status.json"
+    heartbeat_interval_ms: int = 60_000
+    heartbeat_fresh_seconds: int = 120
+    heartbeat_stale_seconds: int = 300
+    sync_worker_interval_ms: int = 300_000
+    remote_status_json_path: str = ""
+    office_heartbeat_poll_ms: int = 30_000
+    disk_warn_percent: float = 80.0
+    disk_critical_percent: float = 90.0
+    video_retention_keep_days: int = 16
 
 
 def _station_from_dict(d: dict[str, Any]) -> StationConfig:
@@ -287,6 +299,26 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
     elif s > 1.0:
         cfg.barcode_scan_scale = 1.0
     cfg.window_always_on_top = bool(cfg.window_always_on_top)
+    if cfg.heartbeat_interval_ms < 5_000:
+        cfg.heartbeat_interval_ms = 5_000
+    elif cfg.heartbeat_interval_ms > 3_600_000:
+        cfg.heartbeat_interval_ms = 3_600_000
+    if cfg.heartbeat_fresh_seconds < 30:
+        cfg.heartbeat_fresh_seconds = 30
+    if cfg.heartbeat_stale_seconds < cfg.heartbeat_fresh_seconds:
+        cfg.heartbeat_stale_seconds = cfg.heartbeat_fresh_seconds + 60
+    if cfg.sync_worker_interval_ms < 10_000:
+        cfg.sync_worker_interval_ms = 10_000
+    if cfg.office_heartbeat_poll_ms < 5_000:
+        cfg.office_heartbeat_poll_ms = 5_000
+    if cfg.disk_warn_percent < 50:
+        cfg.disk_warn_percent = 50.0
+    if cfg.disk_critical_percent < cfg.disk_warn_percent:
+        cfg.disk_critical_percent = cfg.disk_warn_percent + 5.0
+    if cfg.video_retention_keep_days < 0:
+        cfg.video_retention_keep_days = 0
+    elif cfg.video_retention_keep_days > 3650:
+        cfg.video_retention_keep_days = 3650
     return cfg
 
 
@@ -312,6 +344,8 @@ def load_config(path: Path) -> AppConfig:
         cfg.schema_version = 4
     if cfg.schema_version < 5:
         cfg.schema_version = 5
+    if cfg.schema_version < 6:
+        cfg.schema_version = 6
     return normalize_config(cfg)
 
 
