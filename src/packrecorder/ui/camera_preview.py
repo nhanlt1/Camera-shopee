@@ -34,16 +34,19 @@ def bgr_bytes_to_pixmap(
         return None
     rgb = np.ascontiguousarray(rgb)
     h, w = rgb.shape[:2]
-    qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+    qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
     pix = QPixmap.fromImage(qimg)
     mode = (
         Qt.TransformationMode.FastTransformation
         if fast_scale
         else Qt.TransformationMode.SmoothTransformation
     )
+    # int(max_w * h / w) có thể = 0 (khung rất "ngang") → scaled(*, 0) dễ crash native Qt
+    tw = max(1, int(max_w))
+    th = max(1, int(max_w * h / w) if w else tw)
     return pix.scaled(
-        max_w,
-        int(max_w * h / w) if w else max_w,
+        tw,
+        th,
         Qt.AspectRatioMode.KeepAspectRatio,
         mode,
     )
@@ -122,12 +125,14 @@ class CameraPreviewLabel(QLabel):
             h,
             3 * w,
             QImage.Format.Format_RGB888,
-        )
+        ).copy()
         pix = QPixmap.fromImage(qimg)
+        tw = max(1, int(self._max_w))
+        th = max(1, int(self._max_w * h / w) if w else 270)
         self.setPixmap(
             pix.scaled(
-                self._max_w,
-                int(self._max_w * h / w) if w else 270,
+                tw,
+                th,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )

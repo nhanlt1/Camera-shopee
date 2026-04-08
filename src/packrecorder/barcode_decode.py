@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import packrecorder.opencv_video  # noqa: F401 — OPENCV_* env + log trước khi nạp cv2
+
 import cv2
 
 try:

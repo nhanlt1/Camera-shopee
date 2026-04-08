@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS recordings (
   backup_root TEXT,
   resolved_path TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  synced_at TEXT
+  synced_at TEXT,
+  duration_seconds REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_recordings_order ON recordings(order_id);
 CREATE INDEX IF NOT EXISTS idx_recordings_status ON recordings(storage_status);
@@ -34,6 +35,34 @@ def fallback_index_path() -> Path:
     local = os.environ.get("LOCALAPPDATA")
     base = Path(local) if local else Path.home()
     return base / "PackRecorder" / "recording_index.sqlite"
+
+
+def recordings_db_path_for_search(cfg: AppConfig) -> Path | None:
+    """
+    File SQLite để đọc danh sách ghi (tìm kiếm): trùng file app đang ghi.
+
+    - Có video_root: ưu tiên .../PackRecorder/recordings.sqlite, nếu chưa có file thì
+      dùng fallback LOCALAPPDATA (cùng chỗ open_recording_index ghi khi không tạo được ổ chính).
+    - Không video_root: app ghi vào fallback (open_recording_index không dùng remote để ghi);
+      đọc fallback trước; nếu chưa có thì thử recordings.sqlite cạnh remote_status_json (máy xem bản sao).
+    """
+    if (cfg.video_root or "").strip():
+        primary = preferred_index_path(cfg)
+        if primary.is_file():
+            return primary
+        fb = fallback_index_path()
+        if fb.is_file():
+            return fb
+        return None
+    fb0 = fallback_index_path()
+    if fb0.is_file():
+        return fb0
+    r = (cfg.remote_status_json_path or "").strip()
+    if r:
+        p = Path(r).parent / "recordings.sqlite"
+        if p.is_file():
+            return p
+    return None
 
 
 def open_recording_index(cfg: AppConfig) -> tuple["RecordingIndex", bool]:
@@ -80,6 +109,7 @@ class RecordingIndex:
         self._conn.row_factory = sqlite3.Row
         if not uri_readonly:
             self._conn.executescript(_SCHEMA)
+            self._ensure_schema_migrations()
 
     def close(self) -> None:
         if self._conn:
@@ -97,12 +127,13 @@ class RecordingIndex:
         backup_root: str | None,
         resolved_path: str,
         created_at: str,
+        duration_seconds: float = 0.0,
     ) -> None:
         assert self._conn
         self._conn.execute(
             """INSERT INTO recordings
-            (order_id, packer, rel_key, storage_status, primary_root, backup_root, resolved_path, created_at)
-            VALUES (?,?,?,?,?,?,?,?)""",
+            (order_id, packer, rel_key, storage_status, primary_root, backup_root, resolved_path, created_at, duration_seconds)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
             (
                 order_id,
                 packer,
@@ -112,8 +143,14 @@ class RecordingIndex:
                 backup_root or "",
                 resolved_path,
                 created_at,
+                float(max(0.0, duration_seconds)),
             ),
         )
+        self._conn.commit()
+
+    def delete_by_id(self, row_id: int) -> None:
+        assert self._conn
+        self._conn.execute("DELETE FROM recordings WHERE id=?", (int(row_id),))
         self._conn.commit()
 
     def mark_synced(self, row_id: int, new_resolved_path: str) -> None:
@@ -140,6 +177,7 @@ class RecordingIndex:
         date_from: str | None = None,
         date_to: str | None = None,
         storage_status: str | None = None,
+        storage_status_in: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         assert self._conn
         q = "SELECT * FROM recordings WHERE 1=1"
@@ -154,9 +192,24 @@ class RecordingIndex:
         if date_to:
             q += " AND created_at <= ?"
             args.append(date_to)
-        if storage_status:
+        if storage_status_in:
+            ph = ",".join("?" * len(storage_status_in))
+            q += f" AND storage_status IN ({ph})"
+            args.extend(storage_status_in)
+        elif storage_status:
             q += " AND storage_status = ?"
             args.append(storage_status)
         q += " ORDER BY created_at DESC LIMIT 500"
         cur = self._conn.execute(q, args)
         return [dict(r) for r in cur.fetchall()]
+
+    def _ensure_schema_migrations(self) -> None:
+        """Add missing columns for old DB files without destructive migrations."""
+        assert self._conn
+        cur = self._conn.execute("PRAGMA table_info(recordings)")
+        cols = {str(r["name"]) for r in cur.fetchall()}
+        if "duration_seconds" not in cols:
+            self._conn.execute(
+                "ALTER TABLE recordings ADD COLUMN duration_seconds REAL NOT NULL DEFAULT 0"
+            )
+            self._conn.commit()

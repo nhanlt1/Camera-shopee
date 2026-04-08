@@ -1,7 +1,8 @@
-"""Log lỗi theo phiên: mỗi lần khởi động app xóa/ghi lại file, trong phiên chỉ thêm dòng."""
+"""Nhật ký phiên (run_errors.log): mỗi lần khởi động ghi lại từ đầu; ERROR/WARNING khi có sự cố."""
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 import traceback
@@ -19,7 +20,9 @@ STARTUP_HINT_LINES: tuple[str, ...] = (
     "Gợi ý — vừa cắm webcam: bấm «Làm mới camera & cổng COM»; driver MSMF đôi khi cần 1–2 giây sau khi mở app.",
     "Gợi ý — log phiên: mỗi lần mở app, run_errors.log ghi lại từ đầu (Tệp → Mở thư mục log lỗi).",
     "Gợi ý — treo/tắt đột ngột: xem native_crash.txt cùng thư mục với exe hoặc thư mục chạy lệnh.",
-    "Gợi ý — không thấy cửa sổ: Alt+Tab; chạy run_packrecorder.bat / đúp exe từ Explorer thay vì terminal ẩn.",
+    "Gợi ý — không thấy cửa sổ: Alt+Tab; icon khay có thể sau mũi tên ^ (taskbar Windows); "
+    "Tệp → Cài đặt → tắt «Khởi động chỉ hiện icon khay» nếu không muốn ẩn lúc mở; "
+    "hoặc PACKRECORDER_SKIP_START_TRAY_HIDE=1 khi chạy từ CMD.",
     "Gợi ý — quét mã: đặt «Camera đọc mã» đúng góc nhìn mã; hai quầy không nên dùng chung một camera đọc khi không có COM.",
     "Gợi ý — tắt máy hẹn giờ: nếu bật trong Cài đặt, đến giờ app mở đếm 60s rồi có thể tắt cả Windows; "
     "mặc định cấu hình mới là tắt tính năng này.",
@@ -52,9 +55,11 @@ def reset_session_log() -> None:
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(
-            f"=== Pack Recorder — phiên làm việc {datetime.now().isoformat()} ===\n"
-            f"File này: {p.resolve()}\n"
-            f"(Các dòng sau: T+ = giây từ lúc reset log; Δ+ = giây từ dòng log trước)\n",
+            f"=== Pack Recorder — nhật ký phiên {datetime.now().isoformat()} ===\n"
+            f"File: {p.resolve()}\n"
+            f"T+ / Δ+ = thời gian từ lúc mở app.\n"
+            f"Không phải lỗi nếu chỉ thấy INFO — chỉ cần xem khi có ERROR hoặc WARNING.\n"
+            f"(Gợi ý dài: đặt biến môi trường PACKRECORDER_SESSION_HINTS=1 rồi mở lại app.)\n",
             encoding="utf-8",
         )
     except OSError:
@@ -81,8 +86,15 @@ def mark_session_phase(label: str) -> None:
     append_session_log("INFO", label)
 
 
+def _env_session_hints_enabled() -> bool:
+    v = os.environ.get("PACKRECORDER_SESSION_HINTS", "0").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def append_startup_hints() -> None:
-    """Thêm các dòng gợi ý (HINT) vào run_errors.log cho phiên hiện tại."""
+    """Thêm dòng gợi ý (HINT) — mặc định tắt; bật: PACKRECORDER_SESSION_HINTS=1."""
+    if not _env_session_hints_enabled():
+        return
     for line in STARTUP_HINT_LINES:
         append_session_log("HINT", line)
 
@@ -151,20 +163,10 @@ def log_session_error(
 
 _prev_excepthook: Optional[Callable[..., object]] = None
 _hooks_installed = False
+_orig_thread_excepthook: Optional[Callable[..., object]] = None
 
 
 def _excepthook(exc_type: type, exc: BaseException, tb: object) -> None:
-    try:
-        from packrecorder.debug_ndjson import dbg
-
-        dbg(
-            "H5",
-            "session_log._excepthook",
-            exc_type.__name__,
-            msg_preview=str(exc)[:500],
-        )
-    except Exception:
-        pass
     try:
         log_session_error(
             f"Ngoại lệ chưa bắt ({exc_type.__name__}): {exc}",
@@ -193,13 +195,23 @@ def enable_native_crash_dump() -> None:
         faulthandler.enable(sys.stderr)
 
 
+def _thread_excepthook(args: object) -> None:
+    if _orig_thread_excepthook is not None:
+        _orig_thread_excepthook(args)
+
+
 def install_runtime_error_hooks() -> None:
     """sys.excepthook + Qt Warning/Critical → run_errors.log."""
-    global _prev_excepthook, _hooks_installed
+    global _prev_excepthook, _hooks_installed, _orig_thread_excepthook
     if not _hooks_installed:
         _hooks_installed = True
         _prev_excepthook = sys.excepthook
         sys.excepthook = _excepthook
+        import threading
+
+        if hasattr(threading, "excepthook"):
+            _orig_thread_excepthook = threading.excepthook
+            threading.excepthook = _thread_excepthook
 
     try:
         from PySide6.QtCore import QtMsgType, qInstallMessageHandler

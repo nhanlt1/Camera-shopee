@@ -1,6 +1,7 @@
 @echo off
-REM Mo CMD de xem loi neu app khong hien hoac tat ngay.
-title Pack Recorder — console
+REM Pack Recorder — khoi dong tach khoi CMD (dong cua so nay KHONG tat app).
+REM Truoc day Python gan vao cung cua so CMD: dong CMD = tat app ngay — rat de nham.
+title Pack Recorder — launcher
 cd /d "%~dp0"
 if not exist ".venv\Scripts\python.exe" (
   echo [LOI] Chua co .venv
@@ -15,10 +16,18 @@ if errorlevel 1 (
   echo [CANH BAO] Khong cai duoc pillow — app van chay, chu tren video dung font don gian.
   echo Thu tay: .venv\Scripts\pip install -e ".\[dev]"
 )
-echo Chay ung dung — neu co loi se hien ben duoi.
-echo Dong cua so nay se tat ung dung.
+REM pythonw = khong cua so console — process doc lap; dong CMD nay khong lam tat app.
+if exist ".venv\Scripts\pythonw.exe" (
+  echo Dang mo Pack Recorder (tach khoi cua so nay)...
+  start "Pack Recorder" /D "%~dp0" "%~dp0.venv\Scripts\pythonw.exe" -m packrecorder
+) else (
+  echo Dang mo Pack Recorder (cua so Python rieng)...
+  start "Pack Recorder" /D "%~dp0" "%~dp0.venv\Scripts\python.exe" -m packrecorder
+)
 echo.
-".venv\Scripts\python.exe" -m packrecorder
+echo Da gui lenh khoi dong. Ban co the DONG cua so CMD nay — app van chay neu da bat duoc.
+echo Log: %LOCALAPPDATA%\PackRecorder\ hoac run_errors.log trong thu muc project.
+echo Neu can xem loi trong console: chay truc tiep:
+echo   .venv\Scripts\python.exe -m packrecorder
 echo.
-echo Ma thoat: %ERRORLEVEL%
 pause

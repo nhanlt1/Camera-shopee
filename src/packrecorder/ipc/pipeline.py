@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import sys
 from multiprocessing.queues import Queue
 from queue import Empty
 from typing import Any, Optional
@@ -157,11 +158,24 @@ class MpCameraPipeline:
             except Empty:
                 break
             out.append(msg)
-            if msg and msg[0] == "ready":
-                _tag, cam, name, w, h, fps, n_sl = msg
-                self._fps = int(fps)
-                self._n_slots = int(n_sl)
-                self._attach_and_start_scanner(str(name), int(w), int(h))
+            if msg and len(msg) > 0 and msg[0] == "ready":
+                try:
+                    if len(msg) < 7:
+                        raise ValueError(f"ready tuple length {len(msg)}")
+                    _tag, cam, name, w, h, fps, n_sl = msg[:7]
+                    self._fps = int(fps)
+                    self._n_slots = int(n_sl)
+                    self._attach_and_start_scanner(str(name), int(w), int(h))
+                except Exception:
+                    try:
+                        from packrecorder.session_log import log_session_error
+
+                        log_session_error(
+                            f"MpCameraPipeline.pump_events: xử lý ready thất bại: {msg!r}",
+                            exc_info=sys.exc_info(),
+                        )
+                    except Exception:
+                        pass
         return out
 
     def pump_decodes(self) -> list[tuple[int, str]]:

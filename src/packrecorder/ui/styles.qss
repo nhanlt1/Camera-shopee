@@ -4,6 +4,75 @@ QMainWindow {
   background: #fafafa;
 }
 
+/* Thanh công cụ (độ phân giải, v.v.) — nền sáng, không bị đen */
+QToolBar {
+  background: #ffffff;
+  border: none;
+  border-bottom: 1px solid #e0e0e0;
+  spacing: 8px;
+  padding: 4px 8px;
+}
+
+QToolBar QLabel {
+  color: #212121;
+  background: transparent;
+}
+
+QToolBar QComboBox {
+  background: #ffffff;
+  color: #212121;
+  border: 1px solid #bdbdbd;
+  border-radius: 4px;
+  padding: 4px 8px;
+  min-height: 22px;
+}
+
+QToolBar QComboBox:hover {
+  border-color: #1976d2;
+}
+
+QRadioButton {
+  color: #212121;
+  spacing: 6px;
+}
+
+QRadioButton::indicator {
+  width: 18px;
+  height: 18px;
+}
+
+QRadioButton::indicator:unchecked {
+  border: 2px solid #757575;
+  border-radius: 9px;
+  background: #ffffff;
+}
+
+QRadioButton::indicator:checked {
+  image: none;
+  border: 2px solid #1976d2;
+  border-radius: 9px;
+  background: qradialgradient(cx:0.5, cy:0.5, radius:0.45, fx:0.5, fy:0.5,
+    stop:0 #1976d2, stop:0.55 #1976d2, stop:0.56 #ffffff, stop:1 #ffffff);
+}
+
+QCheckBox {
+  color: #212121;
+  spacing: 6px;
+}
+
+QCheckBox::indicator {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #757575;
+  border-radius: 3px;
+  background: #ffffff;
+}
+
+QCheckBox::indicator:checked {
+  border-color: #1976d2;
+  background: #1976d2;
+}
+
 QMenuBar {
   background: #ffffff;
   padding: 4px;
@@ -33,6 +102,20 @@ QStatusBar {
 
 QDialog {
   background: #ffffff;
+}
+
+/* QScrollArea viewport mặc định hay nền đen trên Windows — Cài đặt và vùng cuộn lồng nhau */
+QScrollArea {
+  background-color: #ffffff;
+  border: none;
+}
+
+QScrollArea > QWidget > QWidget {
+  background-color: #ffffff;
+}
+
+QStackedWidget {
+  background-color: #ffffff;
 }
 
 QLabel,
@@ -115,6 +198,11 @@ QTableWidget {
   border-radius: 4px;
 }
 
+/* Vùng header dọc dưới dòng cuối (không phải ::section) — không tô sẽ thành vệt đen */
+QTableWidget QHeaderView {
+  background-color: #f5f5f5;
+}
+
 QTableWidget::item {
   padding: 4px;
   color: #212121;
@@ -136,6 +224,15 @@ QHeaderView::section {
   padding: 6px 8px;
   border: 1px solid #e0e0e0;
   font-weight: bold;
+}
+
+/* Cột số thứ tự dòng — chữ xám, nền sáng (tránh chữ đen trên nền tối) */
+QHeaderView::section:vertical {
+  background: #f5f5f5;
+  color: #757575;
+  padding: 4px 6px;
+  border: 1px solid #e0e0e0;
+  font-weight: normal;
 }
 
 QTableCornerButton::section {

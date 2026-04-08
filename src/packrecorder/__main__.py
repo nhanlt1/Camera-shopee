@@ -34,6 +34,9 @@ def main() -> None:
     # MSMF: tắt HW transforms giúp nhiều webcam mở nhanh hơn / ít treo lúc set độ phân giải
     # (phải đặt trước khi nạp OpenCV; khuyến nghị upstream / diễn đàn OpenCV).
     os.environ.setdefault("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0")
+    os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "9999")
+    os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_DSHOW", "5000")
+    os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_FFMPEG", "1")
     try:
         from packrecorder.app import run_app
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+import packrecorder.opencv_video  # noqa: F401 — env/log trước cv2 (config import sớm)
+
 import cv2
 
 RecordResolutionPreset = Literal["native", "vga", "hd", "full_hd"]

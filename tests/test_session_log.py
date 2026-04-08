@@ -26,7 +26,7 @@ def test_reset_then_append(log_in_tmp_cwd: Path) -> None:
     assert p.parent.is_dir()
     first = p.read_text(encoding="utf-8")
     assert "=== Pack Recorder" in first
-    assert "phiên làm việc" in first
+    assert "nhật ký phiên" in first
 
     append_session_log("ERROR", "thử ghi lỗi")
     second = p.read_text(encoding="utf-8")
@@ -40,7 +40,9 @@ def test_reset_then_append(log_in_tmp_cwd: Path) -> None:
     assert "=== Pack Recorder" in third
 
 
-def test_append_startup_hints_writes_hint_lines(log_in_tmp_cwd: Path) -> None:
+def test_append_startup_hints_writes_hint_lines(
+    log_in_tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from packrecorder.session_log import (
         STARTUP_HINT_LINES,
         append_startup_hints,
@@ -48,6 +50,7 @@ def test_append_startup_hints_writes_hint_lines(log_in_tmp_cwd: Path) -> None:
         session_log_path,
     )
 
+    monkeypatch.setenv("PACKRECORDER_SESSION_HINTS", "1")
     reset_session_log()
     append_startup_hints()
     text = session_log_path().read_text(encoding="utf-8")

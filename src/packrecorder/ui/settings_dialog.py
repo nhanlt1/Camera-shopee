@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import sys
 import uuid
+from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QGuiApplication, QPalette
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -33,14 +40,21 @@ from packrecorder.config import (
     default_stations,
     stations_non_serial_decode_collision,
 )
+from packrecorder.session_log import log_session_error
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, cfg: AppConfig, parent=None) -> None:
+    def __init__(
+        self,
+        cfg: AppConfig,
+        parent=None,
+        *,
+        on_test_notification: Callable[[str], None] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Cài đặt")
-        self.resize(640, 640)
         self._cfg = cfg
+        self._on_test_notification = on_test_notification
 
         self._root = QLineEdit(cfg.video_root)
         browse = QPushButton("Chọn…")
@@ -113,15 +127,6 @@ class SettingsDialog(QDialog):
             "Giữ cửa sổ nổi trên các app khác. Máy quét USB–COM không cần. "
             "Máy quét giả lập bàn phím: luôn dùng chế độ Đa quầy và để tiêu điểm ở ô «Mã đơn»."
         )
-        self._mp_camera = QCheckBox(
-            "Capture/quét mã qua multiprocessing + bộ nhớ chia sẻ (giảm nghẽn UI; Windows)"
-        )
-        self._mp_camera.setChecked(cfg.use_multiprocessing_camera_pipeline)
-        self._mp_camera.setToolTip(
-            "Đọc camera và pyzbar chạy tiến trình riêng, khung hình qua SharedMemory. "
-            "Ghi FFmpeg vẫn ở tiến trình chính. Tắt nếu gặp lỗi hoặc treo khi mở camera."
-        )
-
         self._retention = QSpinBox()
         self._retention.setRange(0, 3650)
         self._retention.setValue(int(cfg.video_retention_keep_days))
@@ -136,17 +141,11 @@ class SettingsDialog(QDialog):
         backup_row = QHBoxLayout()
         backup_row.addWidget(self._backup_root)
         backup_row.addWidget(br_btn)
-        self._remote_status = QLineEdit(cfg.remote_status_json_path)
-        self._remote_status.setPlaceholderText(
-            "Máy phụ: đường đầy đủ tới status.json (Drive map hoặc UNC)"
+        self._status_json_hint = QLabel(
+            "File trạng thái (heartbeat) luôn nằm cùng thư mục gốc video "
+            "(…\\PackRecorder\\status.json). Máy phụ chỉ cần trỏ «Thư mục gốc video» tới cùng ổ/thư mục đã đồng bộ."
         )
-        rs_btn = QPushButton("Chọn…")
-        rs_btn.clicked.connect(self._browse_remote_status)
-        rs_row = QHBoxLayout()
-        rs_row.addWidget(self._remote_status)
-        rs_row.addWidget(rs_btn)
-        self._status_rel = QLineEdit(cfg.status_json_relative)
-        self._status_rel.setPlaceholderText("PackRecorder/status.json")
+        self._status_json_hint.setWordWrap(True)
 
         vid_box = QGroupBox("Quản lý video")
         vf = QFormLayout(vid_box)
@@ -155,12 +154,11 @@ class SettingsDialog(QDialog):
         ha_box = QGroupBox("Ổ dự phòng và trạng thái máy")
         ha_box.setToolTip(
             "Ổ dự phòng: lưu video khi ổ chính (ví dụ Drive) lỗi. "
-            "File trạng thái (heartbeat): máy phụ đọc để biết máy quay còn «sống» không."
+            "Heartbeat ghi tự động dưới thư mục gốc video (PackRecorder/status.json)."
         )
         hf = QFormLayout(ha_box)
         hf.addRow("Thư mục dự phòng (máy quay)", backup_row)
-        hf.addRow("File theo dõi trạng thái (máy phụ)", rs_row)
-        hf.addRow("Vị trí file trạng thái trên máy quay", self._status_rel)
+        hf.addRow(self._status_json_hint)
 
         self._beep_short = QSpinBox()
         self._beep_short.setRange(20, 2000)
@@ -182,11 +180,71 @@ class SettingsDialog(QDialog):
         common.addRow("Giờ tắt (HH:MM)", self._shutdown_time)
         common.addRow(self._sound_on)
         common.addRow("Chế độ âm", self._sound_mode)
+        test_outer = QWidget()
+        test_row = QHBoxLayout(test_outer)
+        test_row.setContentsMargins(0, 0, 0, 0)
+        self._test_notify_source = QComboBox()
+        self._test_notify_source.addItem("Loa / beep hệ thống", "speaker")
+        self._test_notify_source.addItem("Máy quét host (HID)", "scanner_host")
+        self._test_notify_source.addItem("Thông báo khay", "tray")
+        btn_test_notify = QPushButton("Thử thông báo")
+        btn_test_notify.setToolTip(
+            "Kiểm tra nguồn phát — không cần bấm Lưu; dùng cấu hình Âm báo hiện tại."
+        )
+        btn_test_notify.clicked.connect(self._emit_test_notification)
+        test_row.addWidget(QLabel("Thử phát từ:"))
+        test_row.addWidget(self._test_notify_source, 1)
+        test_row.addWidget(btn_test_notify)
+        if on_test_notification is None:
+            self._test_notify_source.setEnabled(False)
+            btn_test_notify.setEnabled(False)
+        common.addRow("Thử thông báo", test_outer)
         common.addRow("Bíp ngắn (ms)", self._beep_short)
         common.addRow("Khoảng cách 2 bíp (ms)", self._beep_gap)
         common.addRow("Bíp dài (ms)", self._beep_long)
         common.addRow(self._always_top)
-        common.addRow(self._mp_camera)
+
+        self._minimize_tray = QCheckBox(
+            "Thu vào khay hệ thống (đóng cửa sổ = ẩn, không thoát app)"
+        )
+        self._minimize_tray.setChecked(cfg.minimize_to_tray)
+        self._minimize_tray.setToolTip(
+            "Bật thì nút X chỉ ẩn cửa sổ; thoát thật qua menu chuột phải icon khay → Thoát."
+        )
+        self._start_tray = QCheckBox("Khởi động chỉ hiện icon khay (ẩn cửa sổ)")
+        self._start_tray.setChecked(cfg.start_in_tray)
+        self._close_tray = QCheckBox("Nút X chỉ ẩn (không dừng quay/đồng bộ)")
+        self._close_tray.setChecked(cfg.close_to_tray)
+        self._low_priority = QCheckBox("Ưu tiên CPU thấp (Below normal — Windows: cài pip install psutil)")
+        self._low_priority.setChecked(cfg.low_process_priority)
+        self._tray_toast = QCheckBox("Thông báo khay khi bắt đầu quay đơn (khi cửa sổ đang ẩn)")
+        self._tray_toast.setChecked(cfg.tray_show_toast_on_order)
+        self._health_interval = QSpinBox()
+        self._health_interval.setRange(0, 1440)
+        self._health_interval.setValue(int(cfg.tray_health_beep_interval_min))
+        self._health_interval.setToolTip(
+            "0 = tắt. Định kỳ phát tiếng rất nhẹ khi cửa sổ ẩn để biết app còn chạy (kho yên: chỉnh âm lượng nhỏ)."
+        )
+        self._health_vol = QDoubleSpinBox()
+        self._health_vol.setRange(0.0, 1.0)
+        self._health_vol.setSingleStep(0.05)
+        self._health_vol.setDecimals(2)
+        self._health_vol.setValue(float(cfg.tray_health_beep_volume))
+        self._global_hook = QCheckBox(
+            "Thử lắng nghe mã toàn cục (chưa hỗ trợ — ưu tiên máy quét COM khi chạy nền)"
+        )
+        self._global_hook.setChecked(cfg.enable_global_barcode_hook)
+
+        tray_box = QGroupBox("Khay hệ thống / chạy nền")
+        tf = QFormLayout(tray_box)
+        tf.addRow(self._minimize_tray)
+        tf.addRow(self._start_tray)
+        tf.addRow(self._close_tray)
+        tf.addRow(self._low_priority)
+        tf.addRow(self._tray_toast)
+        tf.addRow("Bíp «còn sống» mỗi (phút), 0 = tắt", self._health_interval)
+        tf.addRow("Âm lượng bíp (0–1)", self._health_vol)
+        tf.addRow(self._global_hook)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Cancel
@@ -194,13 +252,62 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
+        scroll_inner = QWidget()
+        scroll_layout = QVBoxLayout(scroll_inner)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(8)
+        scroll_layout.addWidget(mode_box)
+        scroll_layout.addWidget(self._stack)
+        scroll_layout.addLayout(common)
+        scroll_layout.addWidget(vid_box)
+        scroll_layout.addWidget(ha_box)
+        scroll_layout.addWidget(tray_box)
+
+        scroll = QScrollArea()
+        scroll.setWidget(scroll_inner)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        scroll_inner.setObjectName("settingsScrollInner")
+        vp = scroll.viewport()
+        pal = QPalette(vp.palette())
+        c = QColor("#ffffff")
+        pal.setColor(QPalette.ColorRole.Base, c)
+        pal.setColor(QPalette.ColorRole.Window, c)
+        vp.setPalette(pal)
+        vp.setAutoFillBackground(True)
+        pal_inner = QPalette(scroll_inner.palette())
+        pal_inner.setColor(QPalette.ColorRole.Window, c)
+        scroll_inner.setPalette(pal_inner)
+        scroll_inner.setAutoFillBackground(True)
+
         outer = QVBoxLayout(self)
-        outer.addWidget(mode_box)
-        outer.addWidget(self._stack)
-        outer.addLayout(common)
-        outer.addWidget(vid_box)
-        outer.addWidget(ha_box)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(0)
+        outer.addWidget(scroll, 1)
         outer.addWidget(buttons)
+
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            mh = int(screen.availableGeometry().height() * 0.88)
+            self.setMaximumHeight(max(480, min(mh, 920)))
+        self.resize(640, min(620, self.maximumHeight()))
+
+    def _emit_test_notification(self) -> None:
+        if self._on_test_notification is None:
+            return
+        data = self._test_notify_source.currentData()
+        if data is None:
+            return
+        try:
+            self._on_test_notification(str(data))
+        except Exception:
+            log_session_error(
+                "Lỗi callback «Thử thông báo» (Cài đặt).",
+                exc_info=sys.exc_info(),
+            )
 
     def accept(self) -> None:
         if self._mode_stations.isChecked():
@@ -213,6 +320,10 @@ class SettingsDialog(QDialog):
                     "Mã quét từ camera chỉ được gán một quầy — hãy sửa trước khi lưu.",
                 )
                 return
+        if self._global_hook.isChecked() and not self._cfg.enable_global_barcode_hook:
+            from packrecorder.global_input_optional import try_enable_global_barcode_hook
+
+            try_enable_global_barcode_hook(self)
         super().accept()
 
     def _on_mode_changed(self) -> None:
@@ -241,8 +352,10 @@ class SettingsDialog(QDialog):
         self._stack.addWidget(w)
 
     def _build_page_stations(self, cfg: AppConfig) -> None:
-        w = QWidget()
-        outer = QVBoxLayout(w)
+        # Tránh dùng tên biến `w` cho vòng for — nếu không, `w` trỏ nhầm tới widget con
+        # → trang QVBoxLayout bị GC, layout C++ «already deleted» khi mở hộp thoại.
+        page = QWidget()
+        outer = QVBoxLayout(page)
         outer.addWidget(
             QLabel(
                 "Mỗi dòng: nhãn gói + camera mã nguồn (xem trước chính, ghi, đọc mã khi không dùng COM)."
@@ -252,10 +365,18 @@ class SettingsDialog(QDialog):
         self._stations_layout = QVBoxLayout(self._stations_container)
         self._stations_layout.setContentsMargins(0, 0, 0, 0)
         self._station_rows: list[tuple[QLineEdit, QSpinBox, str, QPushButton]] = []
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self._stations_container)
-        outer.addWidget(scroll)
+        st_scroll = QScrollArea()
+        st_scroll.setWidgetResizable(True)
+        st_scroll.setWidget(self._stations_container)
+        st_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        _white = QColor("#ffffff")
+        for pw in (st_scroll.viewport(), self._stations_container):
+            p = QPalette(pw.palette())
+            p.setColor(QPalette.ColorRole.Base, _white)
+            p.setColor(QPalette.ColorRole.Window, _white)
+            pw.setPalette(p)
+            pw.setAutoFillBackground(True)
+        outer.addWidget(st_scroll)
         add_btn = QPushButton("Thêm quầy")
         add_btn.clicked.connect(self._add_station_row)
         outer.addWidget(add_btn)
@@ -266,7 +387,7 @@ class SettingsDialog(QDialog):
             )
         if not self._station_rows:
             self._add_station_row()
-        self._stack.addWidget(w)
+        self._stack.addWidget(page)
 
     def _append_station_row(
         self,
@@ -351,16 +472,6 @@ class SettingsDialog(QDialog):
         if d:
             self._backup_root.setText(d)
 
-    def _browse_remote_status(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Chọn status.json",
-            self._remote_status.text() or "",
-            "JSON (*.json);;Mọi file (*.*)",
-        )
-        if path:
-            self._remote_status.setText(path)
-
     def _collect_stations(self) -> list[StationConfig]:
         old_by_id = {s.station_id: s for s in self._cfg.stations}
         out: list[StationConfig] = []
@@ -376,6 +487,8 @@ class SettingsDialog(QDialog):
                     cam,
                     scanner_serial_port=prev.scanner_serial_port if prev else "",
                     scanner_serial_baud=prev.scanner_serial_baud if prev else 9600,
+                    scanner_usb_vid=prev.scanner_usb_vid if prev else "",
+                    scanner_usb_pid=prev.scanner_usb_pid if prev else "",
                     preview_display_index=-1,
                     record_roi_norm=prev.record_roi_norm if prev else None,
                 )
@@ -391,13 +504,16 @@ class SettingsDialog(QDialog):
 
         sound_mode = "speaker" if self._sound_mode.currentIndex() == 0 else "scanner_host"
 
-        rel_status = self._status_rel.text().strip() or "PackRecorder/status.json"
+        vr = self._root.text().strip()
+        rel_status = "PackRecorder/status.json"
+        remote_status = str(Path(vr) / rel_status) if vr else ""
+        min_tray = self._minimize_tray.isChecked()
         base = replace(
             self._cfg,
-            video_root=self._root.text().strip(),
+            video_root=vr,
             ffmpeg_path=self._ffmpeg.text().strip(),
             window_always_on_top=self._always_top.isChecked(),
-            use_multiprocessing_camera_pipeline=self._mp_camera.isChecked(),
+            use_multiprocessing_camera_pipeline=True,
             shutdown_enabled=self._shutdown_on.isChecked(),
             shutdown_time_hhmm=self._shutdown_time.text().strip() or "18:00",
             sound_enabled=self._sound_on.isChecked(),
@@ -416,8 +532,16 @@ class SettingsDialog(QDialog):
             pip_overlay_margin=self._pip_mg.value(),
             video_retention_keep_days=int(self._retention.value()),
             video_backup_root=self._backup_root.text().strip(),
-            remote_status_json_path=self._remote_status.text().strip(),
+            remote_status_json_path=remote_status,
             status_json_relative=rel_status,
+            minimize_to_tray=min_tray,
+            start_in_tray=self._start_tray.isChecked() if min_tray else False,
+            close_to_tray=self._close_tray.isChecked(),
+            low_process_priority=self._low_priority.isChecked(),
+            tray_show_toast_on_order=self._tray_toast.isChecked(),
+            tray_health_beep_interval_min=int(self._health_interval.value()),
+            tray_health_beep_volume=float(self._health_vol.value()),
+            enable_global_barcode_hook=self._global_hook.isChecked(),
         )
         if self._mode_pip.isChecked():
             base = replace(

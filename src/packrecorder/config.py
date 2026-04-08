@@ -31,6 +31,10 @@ class StationConfig:
     # Máy quét mã USB dạng serial (COM). Rỗng = đọc mã bằng camera + pyzbar.
     scanner_serial_port: str = ""
     scanner_serial_baud: int = 9600
+    # VID/PID mong muốn để tự nhận diện cổng COM đúng máy quét.
+    # Chuỗi HEX 4 ký tự (vd: "0C2E", "0B61"), rỗng = không ép.
+    scanner_usb_vid: str = ""
+    scanner_usb_pid: str = ""
     # -1 = xem trước trùng camera ghi quầy này; >=0 = index camera xem trước.
     preview_display_index: int = -1
     # (x, y, w, h) chuẩn hoá 0..1 theo khung camera ghi; None = toàn khung.
@@ -57,7 +61,7 @@ def station_record_cam_id(st: StationConfig, station_index: int) -> int:
 
 @dataclass
 class AppConfig:
-    schema_version: int = 6
+    schema_version: int = 8
     video_root: str = ""
     camera_index: int = 0
     packer_label: str = "Máy 1"
@@ -96,8 +100,19 @@ class AppConfig:
     barcode_scan_scale: float = 0.5
     # Cửa sổ luôn trên cùng (giúp thấy app; với máy quét kiểu bàn phím nên kèm focus ô mã).
     window_always_on_top: bool = True
-    # Capture + pyzbar trong multiprocessing + SharedMemory (Windows spawn); tắt = luồng QThread cũ.
-    use_multiprocessing_camera_pipeline: bool = False
+    # Khay hệ thống / chạy nền (plan 2026-04-07)
+    minimize_to_tray: bool = False
+    start_in_tray: bool = False
+    close_to_tray: bool = True
+    low_process_priority: bool = False
+    tray_show_toast_on_order: bool = True
+    tray_health_beep_interval_min: int = 0
+    tray_health_beep_volume: float = 0.12
+    enable_global_barcode_hook: bool = False
+    # COM-only: không dùng đường nhập kiểu wedge (Enter trong ô Mã đơn).
+    scanner_com_only: bool = True
+    # Capture + pyzbar trong multiprocessing + SharedMemory (Windows spawn); luôn bật — không tùy chọn UI.
+    use_multiprocessing_camera_pipeline: bool = True
     # HA / heartbeat / tìm kiếm (plan 2026-04-08)
     video_backup_root: str = ""
     status_json_relative: str = "PackRecorder/status.json"
@@ -222,6 +237,17 @@ def normalize_record_video_codec(value: str) -> RecordVideoCodec:
     return "auto"
 
 
+def _normalize_usb_hex_id(value: object) -> str:
+    raw = str(value or "").strip().upper()
+    if raw.startswith("0X"):
+        raw = raw[2:]
+    if len(raw) != 4:
+        return ""
+    if not all(ch in "0123456789ABCDEF" for ch in raw):
+        return ""
+    return raw
+
+
 def normalize_config(cfg: AppConfig) -> AppConfig:
     if cfg.multi_camera_mode == "stations" and not cfg.stations:
         cfg.stations = default_stations()
@@ -268,6 +294,10 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
                 s = replace(s, record_roi_norm=None)
         if s.scanner_serial_baud < 1200 or s.scanner_serial_baud > 921600:
             s = replace(s, scanner_serial_baud=9600)
+        vid = _normalize_usb_hex_id(s.scanner_usb_vid)
+        pid = _normalize_usb_hex_id(s.scanner_usb_pid)
+        if vid != s.scanner_usb_vid or pid != s.scanner_usb_pid:
+            s = replace(s, scanner_usb_vid=vid, scanner_usb_pid=pid)
         cfg.stations[i] = s
     ensure_distinct_station_record_cameras(cfg)
     ensure_decode_camera_not_peer_record(cfg)
@@ -299,6 +329,28 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
     elif s > 1.0:
         cfg.barcode_scan_scale = 1.0
     cfg.window_always_on_top = bool(cfg.window_always_on_top)
+    cfg.minimize_to_tray = bool(cfg.minimize_to_tray)
+    cfg.start_in_tray = bool(cfg.start_in_tray)
+    if not cfg.minimize_to_tray:
+        cfg.start_in_tray = False
+    cfg.close_to_tray = bool(cfg.close_to_tray)
+    cfg.low_process_priority = bool(cfg.low_process_priority)
+    cfg.tray_show_toast_on_order = bool(cfg.tray_show_toast_on_order)
+    cfg.enable_global_barcode_hook = bool(cfg.enable_global_barcode_hook)
+    cfg.scanner_com_only = bool(cfg.scanner_com_only)
+    if cfg.scanner_com_only:
+        cfg.enable_global_barcode_hook = False
+    if cfg.tray_health_beep_interval_min < 0:
+        cfg.tray_health_beep_interval_min = 0
+    elif cfg.tray_health_beep_interval_min > 1440:
+        cfg.tray_health_beep_interval_min = 1440
+    tv = float(cfg.tray_health_beep_volume)
+    if tv < 0.0:
+        cfg.tray_health_beep_volume = 0.0
+    elif tv > 1.0:
+        cfg.tray_health_beep_volume = 1.0
+    else:
+        cfg.tray_health_beep_volume = tv
     if cfg.heartbeat_interval_ms < 5_000:
         cfg.heartbeat_interval_ms = 5_000
     elif cfg.heartbeat_interval_ms > 3_600_000:
@@ -319,6 +371,19 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
         cfg.video_retention_keep_days = 0
     elif cfg.video_retention_keep_days > 3650:
         cfg.video_retention_keep_days = 3650
+    # File heartbeat / máy phụ đọc: cùng cây thư mục với thư mục gốc video (không cấu hình riêng).
+    cfg.status_json_relative = "PackRecorder/status.json"
+    vr_root = (cfg.video_root or "").strip()
+    cfg.remote_status_json_path = (
+        str(Path(vr_root) / cfg.status_json_relative) if vr_root else ""
+    )
+    cfg.use_multiprocessing_camera_pipeline = bool(
+        cfg.use_multiprocessing_camera_pipeline
+    )
+    # Cho phép tắt MP (luồng process + shared memory) khi gặp crash native — không sửa config.json.
+    _dmp = (os.environ.get("PACKRECORDER_DISABLE_MP") or "").strip().lower()
+    if _dmp in ("1", "true", "yes", "on"):
+        cfg.use_multiprocessing_camera_pipeline = False
     return cfg
 
 
@@ -346,6 +411,10 @@ def load_config(path: Path) -> AppConfig:
         cfg.schema_version = 5
     if cfg.schema_version < 6:
         cfg.schema_version = 6
+    if cfg.schema_version < 7:
+        cfg.schema_version = 7
+    if cfg.schema_version < 8:
+        cfg.schema_version = 8
     return normalize_config(cfg)
 
 

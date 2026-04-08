@@ -9,6 +9,10 @@ import sys
 os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
 # Giảm độ trễ / treo khi mở webcam qua MSMF (đặt trước import cv2).
 os.environ.setdefault("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0")
+# Tránh FFmpeg videoio thử liệt kê DSHOW (WARN cap_ffmpeg_impl / Failed list devices for backend dshow).
+os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "9999")
+os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_DSHOW", "5000")
+os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_FFMPEG", "1")
 
 import cv2
 
@@ -36,8 +40,9 @@ def _env_truthy(name: str) -> bool:
 
 def open_video_capture(index: int) -> cv2.VideoCapture:
     """
-    Windows: mặc định thử MSMF trước (ổn định với index), rồi backend 0, rồi DirectShow.
-    Nếu đặt PACKRECORDER_PREFER_DSHOW=1 thì thử DirectShow trước (một số máy mở nhanh hơn).
+    Windows: thử MSMF rồi DirectShow — không dùng CAP_ANY (0): một số bản OpenCV
+    sẽ đi qua FFmpeg và in WARN «Failed list devices for backend dshow», đôi khi mở cam lỗi.
+    PACKRECORDER_PREFER_DSHOW=1: thử DirectShow trước.
     """
     if sys.platform != "win32":
         return cv2.VideoCapture(index)
@@ -50,11 +55,9 @@ def open_video_capture(index: int) -> cv2.VideoCapture:
             order.append(int(cap_dshow))
         if cap_msmf is not None:
             order.append(int(cap_msmf))
-        order.append(0)
     else:
         if cap_msmf is not None:
             order.append(int(cap_msmf))
-        order.append(0)
         if cap_dshow is not None:
             order.append(int(cap_dshow))
 
@@ -65,10 +68,8 @@ def open_video_capture(index: int) -> cv2.VideoCapture:
             seen.add(api)
             uniq.append(api)
 
-    last: cv2.VideoCapture | None = None
     for api in uniq:
         cap = cv2.VideoCapture(index, api)
-        last = cap
         if cap.isOpened():
             try:
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -76,7 +77,11 @@ def open_video_capture(index: int) -> cv2.VideoCapture:
                 pass
             return cap
         cap.release()
-    return last if last is not None else cv2.VideoCapture(index)
+    if cap_msmf is not None:
+        return cv2.VideoCapture(index, int(cap_msmf))
+    if cap_dshow is not None:
+        return cv2.VideoCapture(index, int(cap_dshow))
+    return cv2.VideoCapture(index)
 
 
 def open_rtsp_capture(url: str) -> cv2.VideoCapture:
@@ -90,14 +95,6 @@ def open_rtsp_capture(url: str) -> cv2.VideoCapture:
     url = (url or "").strip()
     if not url:
         return cv2.VideoCapture()
-    # region agent log
-    try:
-        from packrecorder.debug_ndjson import dbg, dbg_safe_url
-
-        dbg_safe_url("H2", "opencv_video.open_rtsp_capture", url)
-    except Exception:
-        pass
-    # endregion agent log
     os.environ.setdefault("OPENCV_FFMPEG_RTSP_TRANSPORT", "tcp")
     try:
         open_ms = int(os.environ.get("PACKRECORDER_RTSP_OPEN_TIMEOUT_MS", "8000"))
@@ -123,20 +120,6 @@ def open_rtsp_capture(url: str) -> cv2.VideoCapture:
         )
     else:
         cap = cv2.VideoCapture(url)
-    # region agent log
-    try:
-        from packrecorder.debug_ndjson import dbg
-
-        dbg(
-            "H2",
-            "opencv_video.open_rtsp_capture.after_construct",
-            "VideoCapture returned",
-            opened=bool(cap.isOpened()),
-            has_params=bool(params),
-        )
-    except Exception:
-        pass
-    # endregion agent log
     if cap.isOpened():
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

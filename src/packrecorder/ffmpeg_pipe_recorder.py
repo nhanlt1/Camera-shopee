@@ -8,6 +8,7 @@ from threading import Thread
 from typing import Optional
 
 from packrecorder.ffmpeg_encoders import ffmpeg_lists_encoder
+from packrecorder.subprocess_win import popen_extra_kwargs
 from packrecorder.windows_job import assign_process_to_job_object
 
 
@@ -133,6 +134,7 @@ class FFmpegPipeRecorder:
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            **popen_extra_kwargs(),
         )
         if (
             self._attach_job

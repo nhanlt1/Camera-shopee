@@ -10,6 +10,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QMainWindow
 
+from packrecorder.config import default_config_path, load_config
 from packrecorder.session_log import (
     append_startup_hints,
     enable_native_crash_dump,
@@ -107,7 +108,7 @@ def run_app() -> int:
     reset_session_log()
     install_runtime_error_hooks()
     enable_native_crash_dump()
-    mark_session_phase("Đã reset run_errors.log và gắn hooks (excepthook / Qt).")
+    mark_session_phase("Đã reset nhật ký phiên (run_errors.log) và gắn hooks (excepthook / Qt).")
     _ensure_qt_plugins_frozen()
     mark_session_phase("Chuẩn bị frozen Qt plugins (nếu có).")
     _debug_log("run_app: bat dau")
@@ -119,9 +120,11 @@ def run_app() -> int:
         file=sys.stderr,
     )
     print(
-        f"{stderr_timing_prefix()}PackRecorder: log lỗi phiên (mỗi lần mở app ghi lại từ đầu): {log_err}",
+        f"{stderr_timing_prefix()}PackRecorder: nhật ký phiên {log_err} "
+        "(mỗi lần mở ghi lại; chỉ là lỗi nếu có ERROR/WARNING trong file)",
         file=sys.stderr,
     )
+    load_config(default_config_path())
     t_qt = time.monotonic()
     app = QApplication(sys.argv)
     app.setApplicationName("PackRecorder")
@@ -135,9 +138,16 @@ def run_app() -> int:
     )
     with session_log_timed("Khởi tạo MainWindow()"):
         w = MainWindow()
+    if w._config.low_process_priority:
+        from packrecorder.process_priority import set_current_process_below_normal
+
+        set_current_process_below_normal()
     t_show = time.monotonic()
+    tray_works = w._config.minimize_to_tray and w._tray is not None
+    app.setQuitOnLastWindowClosed(not tray_works)
     _center_on_screen(app, w)
     w.show()
+    # Luôn đưa cửa sổ lên trước (kể cả khi sẽ thu khay sau vài giây — tránh cảm giác «mở app không thấy gì»).
     w.raise_()
     w.activateWindow()
     _windows_bring_to_front(w)
@@ -146,6 +156,7 @@ def run_app() -> int:
     QTimer.singleShot(0, lambda: _windows_bring_to_front(w))
     QTimer.singleShot(250, lambda: _windows_bring_to_front(w))
     QTimer.singleShot(800, lambda: _windows_bring_to_front(w))
+    QTimer.singleShot(0, w.apply_start_in_tray)
     mark_session_phase(
         f"Đã show cửa sổ + lên lớp ({time.monotonic() - t_show:.3f}s)"
     )
@@ -158,14 +169,6 @@ def run_app() -> int:
         mark_session_phase(
             "QApplication.aboutToQuit — ứng dụng kết thúc vòng lặp sự kiện."
         )
-        # region agent log
-        try:
-            from packrecorder.debug_ndjson import dbg
-
-            dbg("H3", "app.run_app.aboutToQuit", "aboutToQuit fired")
-        except Exception:
-            pass
-        # endregion agent log
 
     app.aboutToQuit.connect(_about_to_quit_dbg)
     QTimer.singleShot(

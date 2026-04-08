@@ -97,68 +97,41 @@ class ScanWorker(QThread):
         frame_i = 0
         try:
             configure_opencv_logging()
-            # region agent log
-            try:
-                from packrecorder.debug_ndjson import dbg, dbg_safe_url
-
-                dbg(
-                    "H1",
-                    "scan_worker.run.start",
-                    "enter",
-                    cam=self._camera_index,
-                    is_rtsp=isinstance(self._capture_source, str),
-                )
-                if isinstance(self._capture_source, str):
-                    dbg_safe_url("H1", "scan_worker.run.rtsp_url", self._capture_source)
-            except Exception:
-                pass
-            # endregion agent log
             if isinstance(self._capture_source, str):
-                cap = open_rtsp_capture(self._capture_source)
+                try:
+                    cap = open_rtsp_capture(self._capture_source)
+                except Exception:
+                    cap = None
+                if cap is None:
+                    cap = cv2.VideoCapture()
+                if not cap.isOpened():
+                    try:
+                        if cap is not None:
+                            cap.release()
+                    except Exception:
+                        pass
+                    if self._fallback_usb_index is not None:
+                        cap = open_video_capture(int(self._fallback_usb_index))
+                    else:
+                        self.capture_failed.emit(
+                            self._camera_index,
+                            "Không mở được RTSP (không có webcam dự phòng).",
+                        )
+                        return
+                if not cap.isOpened():
+                    self.capture_failed.emit(
+                        self._camera_index,
+                        "Không mở được RTSP và webcam dự phòng (USB). Kiểm tra URL/mạng và chỉ số webcam.",
+                    )
+                    return
             else:
                 cap = open_video_capture(int(self._capture_source))
-            if (
-                isinstance(self._capture_source, str)
-                and (cap is None or not cap.isOpened())
-                and self._fallback_usb_index is not None
-            ):
-                # region agent log
-                try:
-                    from packrecorder.debug_ndjson import dbg
-
-                    dbg(
-                        "H6",
-                        "scan_worker.run.rtsp_fallback",
-                        "rtsp_open_failed_fallback_to_usb",
-                        cam=self._camera_index,
-                        usb_index=int(self._fallback_usb_index),
+                if not cap.isOpened():
+                    self.capture_failed.emit(
+                        self._camera_index,
+                        "Không mở được webcam. Kiểm tra chỉ số camera và kết nối.",
                     )
-                except Exception:
-                    pass
-                # endregion agent log
-                self.capture_failed.emit(
-                    self._camera_index,
-                    f"Không mở được RTSP, tự chuyển sang webcam {int(self._fallback_usb_index)}.",
-                )
-                try:
-                    if cap is not None:
-                        cap.release()
-                except Exception:
-                    pass
-                cap = open_video_capture(int(self._fallback_usb_index))
-            # region agent log
-            try:
-                from packrecorder.debug_ndjson import dbg
-
-                dbg(
-                    "H1",
-                    "scan_worker.run.after_open",
-                    "capture opened",
-                    opened=bool(cap is not None and cap.isOpened()),
-                )
-            except Exception:
-                pass
-            # endregion agent log
+                    return
             preview_discard_left = 0
             cw = 640
             ch = 480
@@ -232,7 +205,8 @@ class ScanWorker(QThread):
                     now_prev = time.monotonic()
                     if now_prev - self._last_preview_mono >= self._preview_min_s:
                         self._last_preview_mono = now_prev
-                        self.preview_ready.emit(self._camera_index, frame.tobytes())
+                        raw = frame.tobytes()
+                        self.preview_ready.emit(self._camera_index, raw)
                 if self._recording:
                     self.frame_ready.emit(self._camera_index, work.tobytes())
                 frame_i += 1
@@ -272,20 +246,6 @@ class ScanWorker(QThread):
                     last_emit_mono = now
                     self.decoded.emit(self._camera_index, raw)
         except Exception:
-            # region agent log
-            try:
-                from packrecorder.debug_ndjson import dbg
-
-                dbg(
-                    "H1",
-                    "scan_worker.run.exception",
-                    "exception in run",
-                    cam=self._camera_index,
-                    is_rtsp=isinstance(self._capture_source, str),
-                )
-            except Exception:
-                pass
-            # endregion agent log
             log_session_error(
                 f"ScanWorker (camera {self._camera_index}) lỗi trong run().",
                 exc_info=sys.exc_info(),

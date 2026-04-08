@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import replace
 from typing import Optional
 
@@ -9,7 +10,6 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QFileDialog,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -23,8 +23,14 @@ from PySide6.QtWidgets import (
 
 from packrecorder.camera_probe import probe_opencv_camera_indices
 from packrecorder.config import AppConfig, StationConfig
+from packrecorder.session_log import log_session_error
 from packrecorder.order_input import normalize_manual_order_text
-from packrecorder.serial_ports import iter_raw_comports, list_filtered_serial_ports
+from packrecorder.serial_ports import (
+    choose_serial_port,
+    iter_raw_comports,
+    list_filtered_serial_ports,
+    vid_pid_by_device,
+)
 from packrecorder.ui.roi_preview_label import RoiPreviewLabel
 
 # Giống placeholder: khi chọn RTSP lần đầu (ô trống), điền sẵn để sửa ngay, không phải gõ lại từng ký tự.
@@ -61,6 +67,11 @@ class DualStationWidget(QWidget):
     _BANNER_TEXT_STYLE = (
         "background-color:#ffebee;color:#b71c1c;padding:4px 8px;"
         "font-size:12px;font-weight:bold;border-radius:4px;border:1px solid #c62828;"
+        "font-family:Consolas,'Cascadia Mono','Segoe UI',sans-serif;"
+    )
+    _PENDING_ORDER_BANNER_STYLE = (
+        "background-color:#ffcdd2;color:#7f0000;padding:6px 10px;"
+        "font-size:13px;font-weight:bold;border-radius:6px;border:2px solid #b71c1c;"
         "font-family:Consolas,'Cascadia Mono','Segoe UI',sans-serif;"
     )
 
@@ -115,9 +126,12 @@ class DualStationWidget(QWidget):
         self._rtsp_connect_btn: list[QPushButton] = []
         self._rtsp_armed: list[bool] = [False, False]
         self._scanner: list[QComboBox] = []
+        self._scanner_match_hint: list[QLabel] = []
         self._decode_hint: list[QLabel] = []
         self._name: list[QLineEdit] = []
         self._manual_col_order: list[QLineEdit] = []
+        self._scanner_expected_vid_pid: list[tuple[str, str]] = [("", ""), ("", "")]
+        self._scanner_com_only: bool = True
 
         columns = QHBoxLayout()
         for col in range(2):
@@ -151,16 +165,20 @@ class DualStationWidget(QWidget):
             row_m.setContentsMargins(0, 4, 0, 0)
             mo = QLineEdit()
             mo.setPlaceholderText(
-                f"Máy {col + 1}: nhập mã (+ Enter hoặc nút) — mỗi lần luôn gửi đúng chữ trong ô. "
+                f"Máy {col + 1}: nhập mã thủ công và bấm nút «Bắt đầu ghi». "
                 "COM: quét lặp cùng mã → dừng. Camera: đổi mã mới mới dừng/chuyển đơn."
             )
             mo.setMinimumHeight(28)
-            mo.returnPressed.connect(lambda c=col: self._emit_manual_col(c))
+            mo.returnPressed.connect(
+                lambda c=col: self._emit_manual_col(c, source="enter")
+            )
             btn_m = QPushButton("Bắt đầu ghi")
             btn_m.setToolTip(
                 "Gửi mã đơn cho quầy này — cùng luồng với máy quét / camera đọc mã."
             )
-            btn_m.clicked.connect(lambda _checked=False, c=col: self._emit_manual_col(c))
+            btn_m.clicked.connect(
+                lambda _checked=False, c=col: self._emit_manual_col(c, source="button")
+            )
             row_m.addWidget(QLabel("Mã đơn:"))
             row_m.addWidget(mo, 1)
             row_m.addWidget(btn_m)
@@ -181,13 +199,13 @@ class DualStationWidget(QWidget):
             form_l.setContentsMargins(0, 0, 0, 0)
             self._column_forms.append(form_w)
 
-            g = QGridLayout()
-            src_lab = QLabel("Camera ghi (mã nguồn)")
-            src_lab.setToolTip(
-                "USB: webcam chỉ số. RTSP: URL đầy đời (có thể sửa trong file config.json). "
-                "Một nguồn cho xem trước, ghi và đọc mã (pyzbar) khi không dùng COM."
-            )
-            g.addWidget(src_lab, 0, 0)
+            ne = QLineEdit()
+            ne.setPlaceholderText(f"Máy {col + 1}")
+            ne.editingFinished.connect(lambda _c=col: self._on_station_name_finished())
+
+            tl_name = QLabel("Tên máy")
+            tl_name.setToolTip("Nhãn hiển thị trên video và trong thư mục lưu file.")
+
             kind_box = QHBoxLayout()
             rb_usb = QRadioButton("USB (webcam)")
             rb_rtsp = QRadioButton("RTSP (IP)")
@@ -201,7 +219,13 @@ class DualStationWidget(QWidget):
             kind_box.addStretch(1)
             kind_w = QWidget()
             kind_w.setLayout(kind_box)
-            g.addWidget(kind_w, 0, 1)
+
+            tl_cam = QLabel("Camera ghi (mã nguồn)")
+            tl_cam.setToolTip(
+                "USB: webcam chỉ số. RTSP: URL đầy đời (có thể sửa trong file config.json). "
+                "Một nguồn cho xem trước, ghi và đọc mã (pyzbar) khi không dùng COM."
+            )
+
             cam_stack = QVBoxLayout()
             cam_stack.setContentsMargins(0, 0, 0, 0)
             rc = QComboBox()
@@ -222,6 +246,10 @@ class DualStationWidget(QWidget):
             cam_stack.addWidget(rtsp)
             self._rtsp_url.append(rtsp)
             btn_rtsp = QPushButton("Kết nối RTSP")
+            btn_rtsp.setToolTip(
+                "Chỉ sau khi bấm nút này app mới lưu cấu hình RTSP và mở luồng — "
+                "chọn USB thì không kích hoạt RTSP. Sửa URL: cần bấm lại để áp dụng."
+            )
             btn_rtsp.setVisible(False)
             btn_rtsp.clicked.connect(
                 lambda _checked=False, c=col: self._on_rtsp_connect_clicked(c)
@@ -230,27 +258,64 @@ class DualStationWidget(QWidget):
             self._rtsp_connect_btn.append(btn_rtsp)
             cw = QWidget()
             cw.setLayout(cam_stack)
-            g.addWidget(cw, 1, 0, 1, 2)
             self._record.append(rc)
             bg.idClicked.connect(lambda _id, c=col: self._on_record_kind_changed(c))
 
-            lab_scan = QLabel("Máy quét (USB–COM)")
-            lab_scan.setToolTip(
-                "Mỗi cổng hiển thị tên thiết bị (Windows) + hãng + mã VID:PID khi có — "
-                "bấm «Làm mới camera & cổng COM» để quét lại sau khi cắm máy quét.\n"
-                "Tốc độ Baud dùng mặc định trong cấu hình (thường 9600); cần khác thì chỉnh trong "
-                "tệp cấu hình JSON (không hiện nút trên UI để tránh chỉnh nhầm)."
-            )
-            g.addWidget(lab_scan, 2, 0)
             sc = QComboBox()
-            sc.setMinimumWidth(320)
+            sc.setMinimumWidth(200)
             sc.setToolTip(
                 "Chọn đúng máy quét: đọc cả dòng mô tả, không chỉ COMx. "
                 "Ưu tiên cổng USB serial (thường lên đầu danh sách)."
             )
             sc.currentIndexChanged.connect(lambda _i, c=col: self._on_scanner_or_decode_changed(c))
-            g.addWidget(sc, 2, 1)
             self._scanner.append(sc)
+
+            tl_scan = QLabel("Máy quét (USB–COM)")
+            tl_scan.setToolTip(
+                "Mỗi cổng hiển thị tên thiết bị (Windows) + hãng + mã VID:PID khi có — "
+                "bấm «Làm mới camera & cổng COM» để quét lại sau khi cắm máy quét.\n"
+                "Tốc độ Baud dùng mặc định trong cấu hình (thường 9600); cần khác thì chỉnh trong "
+                "tệp cấu hình JSON (không hiện nút trên UI để tránh chỉnh nhầm)."
+            )
+
+            row_controls = QHBoxLayout()
+            row_controls.setSpacing(10)
+
+            v_name = QVBoxLayout()
+            v_name.setSpacing(4)
+            v_name.setContentsMargins(0, 0, 0, 0)
+            v_name.addWidget(tl_name)
+            v_name.addWidget(ne)
+            w_name = QWidget()
+            w_name.setLayout(v_name)
+            row_controls.addWidget(w_name, 1)
+
+            v_cam = QVBoxLayout()
+            v_cam.setSpacing(4)
+            v_cam.setContentsMargins(0, 0, 0, 0)
+            v_cam.addWidget(tl_cam)
+            v_cam.addWidget(kind_w)
+            v_cam.addWidget(cw)
+            w_cam = QWidget()
+            w_cam.setLayout(v_cam)
+            row_controls.addWidget(w_cam, 2)
+
+            v_scan = QVBoxLayout()
+            v_scan.setSpacing(4)
+            v_scan.setContentsMargins(0, 0, 0, 0)
+            v_scan.addWidget(tl_scan)
+            v_scan.addWidget(sc)
+            sh = QLabel("")
+            sh.setStyleSheet("color:#2e7d32;font-size:11px;")
+            sh.setWordWrap(True)
+            sh.setVisible(False)
+            self._scanner_match_hint.append(sh)
+            v_scan.addWidget(sh)
+            w_scan = QWidget()
+            w_scan.setLayout(v_scan)
+            row_controls.addWidget(w_scan, 1)
+
+            self._name.append(ne)
 
             dh = QLabel(
                 "Khi chọn cổng COM ở trên, mã vạch đọc từ máy quét USB–serial.\n"
@@ -259,17 +324,8 @@ class DualStationWidget(QWidget):
             dh.setWordWrap(True)
             dh.setStyleSheet("color:#666;font-size:11px;")
             self._decode_hint.append(dh)
-            form_l.addLayout(g)
+            form_l.addLayout(row_controls)
             form_l.addWidget(dh)
-
-            g3 = QGridLayout()
-            g3.addWidget(QLabel("Tên máy"), 0, 0)
-            ne = QLineEdit()
-            ne.setPlaceholderText(f"Máy {col + 1}")
-            ne.editingFinished.connect(lambda _c=col: self._on_station_name_finished())
-            g3.addWidget(ne, 0, 1)
-            self._name.append(ne)
-            form_l.addLayout(g3)
 
             v.addWidget(form_w, 0)
             columns.addWidget(box, 1)
@@ -285,6 +341,16 @@ class DualStationWidget(QWidget):
         if not (0 <= col < len(self._record_kind)):
             return False
         return self._record_kind[col].checkedId() == 1
+
+    def _rtsp_stream_active_in_ui(self, col: int) -> bool:
+        """True khi radio RTSP + đã bấm «Kết nối» (hoặc đồng bộ từ config đã lưu RTSP)."""
+        if not (0 <= col < len(self._rtsp_armed)):
+            return False
+        return (
+            self._is_rtsp_column(col)
+            and self._rtsp_armed[col]
+            and bool(self._rtsp_url[col].text().strip())
+        )
 
     def _apply_record_kind_visibility(self, col: int) -> None:
         if not (0 <= col < len(self._record)):
@@ -320,7 +386,7 @@ class DualStationWidget(QWidget):
         self.rtsp_connect_requested.emit(col, url)
 
     def _other_column_usb_index(self, other: int) -> int | None:
-        if self._is_rtsp_column(other) and self._rtsp_url[other].text().strip():
+        if self._rtsp_stream_active_in_ui(other):
             return None
         d = self._record[other].currentData()
         return int(d) if d is not None else None
@@ -341,7 +407,15 @@ class DualStationWidget(QWidget):
             if self._scanner[col].count():
                 d = self._scanner[col].currentData()
                 port = str(d) if d else ""
-            self._repopulate_scanner_combo(self._scanner[col], port, probe_serial=True)
+            vid, pid = self._scanner_expected_vid_pid[col]
+            self._repopulate_scanner_combo(
+                self._scanner[col],
+                port,
+                expected_vid=vid,
+                expected_pid=pid,
+                col=col,
+                probe_serial=True,
+            )
 
     def set_refresh_busy(self, busy: bool) -> None:
         self._btn_refresh.setEnabled(not busy)
@@ -355,6 +429,7 @@ class DualStationWidget(QWidget):
 
     def apply_camera_probe_result(self, probed: list[int]) -> None:
         """Cập nhật danh sách camera sau probe nền (giống refresh_device_lists nhưng có sẵn probed)."""
+        self._debounce.stop()
         self._cam_indices = sorted(set(probed or [0]) | self._indices_from_combos())
         pr0 = self._record[0].currentData()
         pr1 = self._record[1].currentData()
@@ -380,7 +455,15 @@ class DualStationWidget(QWidget):
             if self._scanner[col].count():
                 d = self._scanner[col].currentData()
                 port = str(d) if d else ""
-            self._repopulate_scanner_combo(self._scanner[col], port, probe_serial=True)
+            vid, pid = self._scanner_expected_vid_pid[col]
+            self._repopulate_scanner_combo(
+                self._scanner[col],
+                port,
+                expected_vid=vid,
+                expected_pid=pid,
+                col=col,
+                probe_serial=True,
+            )
 
             self._on_scanner_or_decode_changed(col, emit=False)
 
@@ -416,7 +499,14 @@ class DualStationWidget(QWidget):
         self._repopulate_camera_combo(self._record[col], allowed, select)
 
     def _repopulate_scanner_combo(
-        self, combo: QComboBox, select_port: str, *, probe_serial: bool = True
+        self,
+        combo: QComboBox,
+        select_port: str,
+        *,
+        expected_vid: str = "",
+        expected_pid: str = "",
+        col: int | None = None,
+        probe_serial: bool = True,
     ) -> None:
         with QSignalBlocker(combo):
             combo.clear()
@@ -427,23 +517,54 @@ class DualStationWidget(QWidget):
                     "",
                 )
                 combo.setCurrentIndex(0)
+                if col is not None and 0 <= col < len(self._scanner_match_hint):
+                    self._scanner_match_hint[col].setVisible(False)
                 return
             sp = (select_port or "").strip()
             pairs = list_filtered_serial_ports(try_open_ports=probe_serial)
             listed = {d for d, _ in pairs}
+            auto_port, auto_detected = choose_serial_port(
+                selected_port=sp,
+                expected_vid=expected_vid,
+                expected_pid=expected_pid,
+                try_open_ports=probe_serial,
+            )
             if sp and sp not in listed:
                 combo.addItem(f"{sp} — (đã lưu trong cấu hình)", sp)
             for device, label in pairs:
                 combo.addItem(label, device)
-            idx = combo.findData(sp)
+            idx = combo.findData(auto_port)
             if idx < 0:
                 idx = 0
             combo.setCurrentIndex(idx)
+            if col is not None and 0 <= col < len(self._scanner_match_hint):
+                hint = self._scanner_match_hint[col]
+                if (
+                    auto_detected
+                    and auto_port
+                    and len((expected_vid or "").strip()) == 4
+                    and len((expected_pid or "").strip()) == 4
+                ):
+                    hint.setText(
+                        f"Tự nhận diện theo VID:PID {expected_vid}:{expected_pid} -> {auto_port}"
+                    )
+                    hint.setVisible(True)
+                elif (
+                    len((expected_vid or "").strip()) == 4
+                    and len((expected_pid or "").strip()) == 4
+                    and not auto_port
+                ):
+                    hint.setText(
+                        f"Không thấy thiết bị VID:PID {expected_vid}:{expected_pid} (đang dùng camera đọc mã)."
+                    )
+                    hint.setVisible(True)
+                else:
+                    hint.setVisible(False)
 
     def _indices_from_combos(self) -> set[int]:
         out: set[int] = set()
         for col in range(2):
-            if self._is_rtsp_column(col) and self._rtsp_url[col].text().strip():
+            if self._rtsp_stream_active_in_ui(col):
                 out.add(10 + col)
             else:
                 d = self._record[col].currentData()
@@ -499,6 +620,54 @@ class DualStationWidget(QWidget):
                     with QSignalBlocker(self._scanner[oc]):
                         self._scanner[oc].setCurrentIndex(0)
                     self._on_scanner_or_decode_changed(oc, emit=False)
+        self._apply_manual_order_readonly()
+
+    def _apply_manual_order_readonly(self) -> None:
+        """Ô «Mã đơn» chỉ đọc khi quầy dùng máy quét COM — tránh wedge gõ nhầm ô máy khác."""
+        try:
+            for col in range(2):
+                port = self._scanner[col].currentData()
+                use_serial = bool(port and str(port).strip())
+                self._manual_col_order[col].setReadOnly(use_serial)
+        except Exception:
+            log_session_error(
+                "Lỗi trong _apply_manual_order_readonly.",
+                exc_info=sys.exc_info(),
+            )
+
+    def set_manual_order_text(self, col: int, text: str, *, focus: bool = True) -> None:
+        """Ghi mã vào đúng cột (luồng serial); focus hoãn 1 tick để tránh tái nhập/Qt khi tín hiệu từ thread."""
+        try:
+            if not (0 <= col < len(self._manual_col_order)):
+                return
+            mo = self._manual_col_order[col]
+            with QSignalBlocker(mo):
+                mo.setText(text)
+            if focus:
+
+                def _defer_focus() -> None:
+                    try:
+                        if not (0 <= col < len(self._manual_col_order)):
+                            return
+                        w = self._manual_col_order[col]
+                        if not w.isVisible():
+                            return
+                        win = w.window()
+                        if win is None or not win.isVisible():
+                            return
+                        w.setFocus(Qt.FocusReason.OtherFocusReason)
+                    except Exception:
+                        log_session_error(
+                            "Lỗi defer focus ô Mã đơn (serial).",
+                            exc_info=sys.exc_info(),
+                        )
+
+                QTimer.singleShot(0, _defer_focus)
+        except Exception:
+            log_session_error(
+                "Lỗi set_manual_order_text (serial / ô Mã đơn).",
+                exc_info=sys.exc_info(),
+            )
 
     def sync_from_config(
         self,
@@ -507,7 +676,13 @@ class DualStationWidget(QWidget):
         probed_override: list[int] | None = None,
         fast_serial_scan: bool = False,
     ) -> None:
-        self._root.setText(cfg.video_root)
+        # Hủy debounce đang chờ — nếu không, ~320ms sau sync khởi động vẫn bắn fields_changed
+        # → MainWindow._on_dual_fields_changed → _restart_scan_workers lần 2 ngay lúc worker
+        # đang probe (log: chỉ thấy probe_done cam 0, cam 1 chưa kịp → xung đột MSMF / crash).
+        self._debounce.stop()
+        with QSignalBlocker(self._root):
+            self._root.setText(cfg.video_root)
+        self._scanner_com_only = bool(cfg.scanner_com_only)
         if probed_override is not None:
             probed = list(probed_override)
         else:
@@ -546,14 +721,22 @@ class DualStationWidget(QWidget):
                     bg.button(1).setChecked(True)
                 else:
                     bg.button(0).setChecked(True)
-            self._rtsp_url[col].setText((s.record_rtsp_url or "").strip())
+            with QSignalBlocker(self._rtsp_url[col]):
+                self._rtsp_url[col].setText((s.record_rtsp_url or "").strip())
             self._apply_record_kind_visibility(col)
+            vid = (s.scanner_usb_vid or "").strip().upper()
+            pid = (s.scanner_usb_pid or "").strip().upper()
+            self._scanner_expected_vid_pid[col] = (vid, pid)
             self._repopulate_scanner_combo(
                 self._scanner[col],
                 (s.scanner_serial_port or "").strip(),
+                expected_vid=vid,
+                expected_pid=pid,
+                col=col,
                 probe_serial=not fast_serial_scan,
             )
-            self._name[col].setText(s.packer_label)
+            with QSignalBlocker(self._name[col]):
+                self._name[col].setText(s.packer_label)
             self._on_scanner_or_decode_changed(col, emit=False)
             with QSignalBlocker(self._preview[col]):
                 self._preview[col].set_roi_norm(s.record_roi_norm)
@@ -570,6 +753,7 @@ class DualStationWidget(QWidget):
                         or self._usb_index_for_sync(cfg.stations[col], col)
                     ),
                 )
+        self._apply_manual_order_readonly()
 
     def duplicate_scanner_ports(self) -> bool:
         raw = [
@@ -579,12 +763,20 @@ class DualStationWidget(QWidget):
 
     def apply_to_config(self, cfg: AppConfig) -> None:
         cfg.video_root = self._root.text().strip()
+        vid_pid_map = vid_pid_by_device()
         for col in range(min(2, len(cfg.stations))):
             s = cfg.stations[col]
             raw_port = self._scanner[col].currentData()
             port = ""
             if raw_port and str(raw_port).strip():
                 port = str(raw_port).strip()
+            cfg_vid = (s.scanner_usb_vid or "").strip().upper()
+            cfg_pid = (s.scanner_usb_pid or "").strip().upper()
+            if port and (not cfg_vid or not cfg_pid):
+                detected = vid_pid_map.get(port, ("", ""))
+                dvid, dpid = detected
+                if dvid and dpid:
+                    cfg_vid, cfg_pid = dvid, dpid
             kind = "rtsp" if self._record_kind[col].checkedId() == 1 else "usb"
             url = self._rtsp_url[col].text().strip()
             if kind == "rtsp" and (not url or not self._rtsp_armed[col]):
@@ -603,6 +795,8 @@ class DualStationWidget(QWidget):
                 decode_camera_index=rec,
                 scanner_serial_port=port,
                 scanner_serial_baud=int(s.scanner_serial_baud),
+                scanner_usb_vid=cfg_vid,
+                scanner_usb_pid=cfg_pid,
                 preview_display_index=-1,
                 record_roi_norm=self._preview[col].get_roi_norm(),
             )
@@ -682,6 +876,26 @@ class DualStationWidget(QWidget):
             lab.setStyleSheet(self._BANNER_TEXT_STYLE)
             lab.setVisible(False)
 
+    def set_column_order_pending(self, col: int, order: str | None) -> None:
+        """Badge đỏ «Đang quét đơn» trước khi encoder bắt đầu ghi; None = ẩn."""
+        if not (0 <= col < len(self._record_banner)):
+            return
+        lab = self._record_banner[col]
+        if order:
+            short = order if len(order) <= 48 else order[:45] + "…"
+            lab.clear()
+            lab.setStyleSheet(self._PENDING_ORDER_BANNER_STYLE)
+            lab.setText(f"Đang quét đơn: {short}")
+            lab.setScaledContents(False)
+            lab.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            )
+            lab.setVisible(True)
+        else:
+            lab.clear()
+            lab.setStyleSheet(self._BANNER_TEXT_STYLE)
+            lab.setVisible(False)
+
     def set_column_recording_overlay_pixmap(self, col: int, pix: Optional[QPixmap]) -> None:
         """Chip giống burn-in video (nền bo tròn + chữ), trong suốt ngoài vùng chip."""
         if not (0 <= col < len(self._record_banner)):
@@ -731,7 +945,7 @@ class DualStationWidget(QWidget):
             port = self._scanner[col].currentData()
             if port and str(port).strip():
                 continue
-            if self._is_rtsp_column(col) and self._rtsp_url[col].text().strip():
+            if self._rtsp_stream_active_in_ui(col):
                 indices.append(10 + col)
             else:
                 rd = self._record[col].currentData()
@@ -745,12 +959,22 @@ class DualStationWidget(QWidget):
 
     def clear_manual_order_column(self, col: int) -> None:
         """Xóa ô mã sau khi đã gửi (đúng quy trình máy quét: mỗi lần quét = một chuỗi mới)."""
+        try:
+            if not (0 <= col < len(self._manual_col_order)):
+                return
+            mo = self._manual_col_order[col]
+            with QSignalBlocker(mo):
+                mo.clear()
+        except Exception:
+            log_session_error(
+                "Lỗi clear_manual_order_column.",
+                exc_info=sys.exc_info(),
+            )
+
+    def _emit_manual_col(self, col: int, *, source: str = "button") -> None:
         if not (0 <= col < len(self._manual_col_order)):
             return
-        self._manual_col_order[col].clear()
-
-    def _emit_manual_col(self, col: int) -> None:
-        if not (0 <= col < len(self._manual_col_order)):
+        if source == "enter" and self._scanner_com_only:
             return
         text = normalize_manual_order_text(self._manual_col_order[col].text())
         if not text:

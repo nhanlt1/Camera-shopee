@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import replace
 from datetime import date, datetime, time as time_cls
@@ -28,12 +29,15 @@ from PySide6.QtWidgets import (
     QComboBox,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QStackedWidget,
     QStatusBar,
+    QSystemTrayIcon,
     QToolBar,
 )
 
+from packrecorder.duplicate import is_duplicate_order
 from packrecorder.config import (
     AppConfig,
     StationConfig,
@@ -67,7 +71,12 @@ from packrecorder.record_resolution import (
 )
 from packrecorder.pip_composite import composite_pip_bgr
 from packrecorder.retention import purge_old_day_folders
-from packrecorder.session_log import log_session_error, mark_session_phase, session_log_path
+from packrecorder.telegram_notify import send_duplicate_order_notice
+from packrecorder.session_log import (
+    log_session_error,
+    mark_session_phase,
+    session_log_path,
+)
 from packrecorder.ipc.encode_writer_worker import mp_encode_writer_entry
 from packrecorder.ipc.pipeline import MpCameraPipeline
 from packrecorder.ipc.subprocess_recorder import SubprocessRecordingHandle
@@ -180,10 +189,10 @@ class MainWindow(QMainWindow):
             _DEFAULT_RECORDING_FPS,
         )
         self._serial_submit_debounce: dict[str, tuple[str, float]] = {}
-        self._debug_preview_logs_left = 3  # agent log: throttle _on_worker_preview
+        self._pending_station_preview: dict[int, tuple[bytes, int, int]] = {}
+        self._station_preview_flush_scheduled: bool = False
         self._restart_in_progress = False
         self._restart_pending = False
-        self._rtsp_error_shown: set[int] = set()
 
         self._order_sm: dict[str, OrderStateMachine] = {}
         self._recorders: dict[
@@ -269,8 +278,7 @@ class MainWindow(QMainWindow):
         self._act_always_top.setToolTip(
             "Ghim cửa sổ luôn nổi trên app khác.\n"
             "• Máy quét COM: không cần ghim vẫn nhận mã.\n"
-            "• Máy quét kiểu bàn phím: ghim + tiêu điểm ở ô «Mã đơn» giúp ký tự vào đúng app "
-            "(triệt để hơn: chỉ dùng COM/serial hoặc đọc mã bằng camera trong app)."
+            "• Chế độ COM-only: không dùng luồng quét kiểu bàn phím (wedge)."
         )
         self._act_always_top.toggled.connect(self._on_always_on_top_toggled)
         pin_bar.addAction(self._act_always_top)
@@ -283,18 +291,17 @@ class MainWindow(QMainWindow):
         act = QAction("Cài đặt", self)
         act.triggered.connect(self._open_settings)
         m_settings.addAction(act)
-        act_log = QAction("Mở thư mục log lỗi…", self)
+        act_log = QAction("Mở thư mục nhật ký phiên…", self)
         act_log.setToolTip(
-            "run_errors.log trong thư mục hiện tại (folder chạy lệnh / cùng chỗ file exe) — "
-            "mỗi lần khởi động app ghi lại từ đầu."
+            "run_errors.log — nhật ký phiên (INFO khi khởi động là bình thường). "
+            "Chỉ cần xem khi có ERROR/WARNING. Thư mục: folder chạy lệnh hoặc cạnh file .exe."
         )
         act_log.triggered.connect(self._open_error_log_folder)
         m_settings.addAction(act_log)
 
-        m_search = self.menuBar().addMenu("Tìm kiếm")
-        act_search = QAction("Danh sách video đã ghi…", self)
+        act_search = QAction("Tìm kiếm video đã ghi", self)
         act_search.triggered.connect(self._open_recording_search)
-        m_search.addAction(act_search)
+        self.menuBar().addAction(act_search)
 
         self._purge_timer = QTimer(self)
         self._purge_timer.timeout.connect(self._run_retention)
@@ -318,6 +325,191 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
+
+        self._shutdown_done = False
+        self._tray: QSystemTrayIcon | None = None
+        self._tray_health_timer = QTimer(self)
+        self._tray_health_timer.timeout.connect(self._on_tray_health_beep)
+        self._setup_system_tray()
+        self._restart_tray_health_timer()
+
+    def _make_tray_colored_icon(self, color: QColor) -> QIcon:
+        pix = QPixmap(16, 16)
+        pix.fill(color)
+        return QIcon(pix)
+
+    def _default_tray_icon_ok(self) -> QIcon:
+        if not self.windowIcon().isNull():
+            return self.windowIcon()
+        return self._make_tray_colored_icon(QColor(46, 125, 50))
+
+    def _set_tray_icon_ok(self) -> None:
+        if self._tray is not None:
+            self._tray.setIcon(self._default_tray_icon_ok())
+
+    def _set_tray_icon_error(self) -> None:
+        if self._tray is not None:
+            self._tray.setIcon(self._make_tray_colored_icon(QColor(198, 40, 40)))
+
+    def _setup_system_tray(self) -> None:
+        if self._tray is not None:
+            self._tray.hide()
+            self._tray.deleteLater()
+            self._tray = None
+        if not self._config.minimize_to_tray:
+            return
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            mark_session_phase(
+                "CẢNH BÁO: Cấu hình «Thu vào khay» bật nhưng khay hệ thống không khả dụng "
+                "(RDP, chính sách, v.v.) — cửa sổ sẽ luôn hiện; nút X sẽ thoát app."
+            )
+            return
+        tray = QSystemTrayIcon(self)
+        tray.setIcon(self._default_tray_icon_ok())
+        tray.setToolTip("Pack Recorder")
+        menu = QMenu()
+        act_show = menu.addAction("Hiện cửa sổ")
+        act_show.triggered.connect(self._show_from_tray)
+        menu.addSeparator()
+        act_quit = menu.addAction("Thoát")
+        act_quit.triggered.connect(self._quit_from_tray)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._on_tray_activated)
+        tray.show()
+        self._tray = tray
+
+    def _show_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._show_from_tray()
+
+    def _quit_from_tray(self) -> None:
+        self._shutdown_application(reason="tray_quit")
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def _shutdown_application(self, *, reason: str = "unknown") -> None:
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+        qa = QApplication.instance()
+        if qa is not None:
+            try:
+                qa.removeEventFilter(self)
+            except Exception:
+                pass
+        if self._sync_worker is not None:
+            self._sync_worker.stop_worker()
+            self._sync_worker.wait(4000)
+            self._sync_worker = None
+        self._close_recording_index()
+        mark_session_phase(
+            "MainWindow — thoát: đồng bộ dừng, đóng index, dừng ghi và worker "
+            "(bấm X khi không dùng khay; hoặc Thoát từ khay; hoặc kết thúc tiến trình)."
+        )
+        self._stop_all_recording_for_shutdown()
+        self._cleanup_workers()
+
+    def _restart_tray_health_timer(self) -> None:
+        self._tray_health_timer.stop()
+        m = int(self._config.tray_health_beep_interval_min)
+        if m <= 0 or not self._config.minimize_to_tray:
+            return
+        self._tray_health_timer.start(m * 60 * 1000)
+
+    def _on_tray_health_beep(self) -> None:
+        if self.isVisible():
+            return
+        if not self._config.minimize_to_tray:
+            return
+        self._feedback.play_health_ping(self._config.tray_health_beep_volume)
+
+    def _maybe_tray_toast_order(self, order: str) -> None:
+        if not self._config.tray_show_toast_on_order or self._tray is None:
+            return
+        if self.isVisible():
+            return
+        short = order if len(order) <= 40 else order[:37] + "…"
+        self._tray.showMessage(
+            "Pack Recorder",
+            f"Đang quay đơn: {short}",
+            QSystemTrayIcon.MessageIcon.Information,
+            2000,
+        )
+
+    def _update_tray_icon_for_pipeline_health(self) -> None:
+        if self._tray is None or not self._mp_pipelines:
+            return
+        req = self._required_camera_indices()
+        if not req:
+            return
+        ok = True
+        for cam in req:
+            pl = self._mp_pipelines.get(cam)
+            if pl is None or not pl.is_ready:
+                ok = False
+                break
+        if ok:
+            self._set_tray_icon_ok()
+        else:
+            self._set_tray_icon_error()
+
+    def apply_start_in_tray(self) -> None:
+        if not (self._config.start_in_tray and self._config.minimize_to_tray):
+            return
+        if self._tray is None:
+            self._status.showMessage(
+                "Khay hệ thống không dùng được — không thể ẩn app lúc khởi động. "
+                "Tắt «Thu vào khay» trong Cài đặt nếu không cần.",
+                12_000,
+            )
+            self.raise_()
+            self.activateWindow()
+            return
+        if (os.environ.get("PACKRECORDER_SKIP_START_TRAY_HIDE") or "").strip() == "1":
+            mark_session_phase(
+                "PACKRECORDER_SKIP_START_TRAY_HIDE=1 — bỏ ẩn cửa sổ lúc khởi động (giữ cửa sổ hiện)."
+            )
+            self._status.showMessage(
+                "Đã bỏ «ẩn lúc khởi động»: biến PACKRECORDER_SKIP_START_TRAY_HIDE=1. "
+                "Hoặc tắt «Khởi động chỉ hiện icon khay» trong Cài đặt.",
+                14_000,
+            )
+            return
+        delay_ms = 2800
+        mark_session_phase(
+            f"«Khởi động trong khay»: cửa sổ hiện ~{delay_ms // 1000}s rồi thu vào khay "
+            "(icon có thể nằm sau mũi tên ^ trên taskbar Windows)."
+        )
+        self._status.showMessage(
+            f"Cửa sổ sẽ thu vào khay sau {delay_ms // 1000}s — xem icon góc taskbar (hoặc ^). "
+            "Tắt trong Cài đặt: «Khởi động chỉ hiện icon khay».",
+            delay_ms + 500,
+        )
+        QTimer.singleShot(delay_ms, self._finish_start_in_tray_hide)
+
+    def _finish_start_in_tray_hide(self) -> None:
+        if self._shutdown_done:
+            return
+        if not (self._config.start_in_tray and self._config.minimize_to_tray):
+            return
+        if self._tray is None:
+            return
+        self.hide()
+        self._tray.show()
+        self._tray.showMessage(
+            "Pack Recorder — đang chạy nền",
+            "Bấm đúp icon ở khay để mở lại.\n"
+            "Không thấy? Windows: mũi tên ^ cạnh đồng hồ.\n"
+            "Muốn luôn thấy cửa sổ: Tệp → Cài đặt → tắt «Khởi động chỉ hiện icon khay».",
+            QSystemTrayIcon.MessageIcon.Information,
+            22_000,
+        )
 
     def eventFilter(self, watched, event) -> bool:  # noqa: ANN001
         et = event.type()
@@ -358,6 +550,8 @@ class MainWindow(QMainWindow):
         self._apply_always_on_top(on)
 
     def _focus_for_scanner_wedge(self) -> None:
+        if self._config.scanner_com_only:
+            return
         if self._config.multi_camera_mode != "stations":
             return
         if self._stack.currentWidget() is not self._dual_panel:
@@ -506,12 +700,44 @@ class MainWindow(QMainWindow):
                 "Mã quét từ camera chỉ được gán một quầy — hãy đổi camera đọc mã hoặc dùng COM riêng.",
             )
             return
+        before_sig = self._stations_config_signature(self._config)
         self._dual_panel.apply_to_config(self._config)
         self._config = normalize_config(self._config)
+        after_sig = self._stations_config_signature(self._config)
+        if before_sig == after_sig:
+            return
         save_config(self._config_path, self._config)
         self._rebuild_order_machines()
         self._update_packer_message()
         self._restart_scan_workers()
+
+    @staticmethod
+    def _stations_config_signature(cfg: AppConfig) -> tuple[object, ...]:
+        """Stable signature for stations-page values to skip no-op restarts."""
+        stations_sig: list[tuple[object, ...]] = []
+        for s in cfg.stations[:2]:
+            stations_sig.append(
+                (
+                    s.station_id,
+                    s.packer_label,
+                    s.record_camera_kind,
+                    s.record_rtsp_url,
+                    int(s.record_camera_index),
+                    int(s.decode_camera_index),
+                    s.scanner_serial_port,
+                    int(s.scanner_serial_baud),
+                    s.scanner_usb_vid,
+                    s.scanner_usb_pid,
+                    int(s.preview_display_index),
+                    tuple(s.record_roi_norm) if s.record_roi_norm is not None else None,
+                )
+            )
+        return (
+            cfg.video_root,
+            bool(cfg.scanner_com_only),
+            tuple(stations_sig),
+            cfg.multi_camera_mode,
+        )
 
     def _on_rtsp_connect_requested(self, col: int, url: str) -> None:
         self._note_user_activity()
@@ -525,43 +751,45 @@ class MainWindow(QMainWindow):
                 "URL phải bắt đầu bằng rtsp://",
             )
             return
-        # region agent log
-        try:
-            from packrecorder.debug_ndjson import dbg
-
-            dbg(
-                "H7",
-                "main_window._on_rtsp_connect_requested",
-                "user_requested_rtsp_connect",
-                col=col,
-                url_len=len(u),
-            )
-        except Exception:
-            pass
-        # endregion agent log
         self._on_dual_fields_changed()
 
     def _mp_service_tick(self) -> None:
         if not self._mp_pipelines:
             return
-        for _cam, pl in list(self._mp_pipelines.items()):
-            for msg in pl.pump_events():
-                if not msg:
-                    continue
-                kind = msg[0]
-                if kind == "capture_failed":
-                    self._on_worker_capture_failed(int(msg[1]), str(msg[2]))
-                elif kind == "ready":
-                    self._on_camera_opened_slot(
-                        int(msg[1]), int(msg[3]), int(msg[4]), int(msg[5])
-                    )
-            for cam_i, text in pl.pump_decodes():
-                self._on_decoded(cam_i, text)
-        self._refresh_mp_recording_and_preview()
+        try:
+            for _cam, pl in list(self._mp_pipelines.items()):
+                for msg in pl.pump_events():
+                    if not msg:
+                        continue
+                    kind = msg[0]
+                    if kind == "capture_failed":
+                        if len(msg) >= 3:
+                            self._on_worker_capture_failed(
+                                int(msg[1]), str(msg[2])
+                            )
+                    elif kind == "ready":
+                        if len(msg) >= 6:
+                            self._on_camera_opened_slot(
+                                int(msg[1]),
+                                int(msg[3]),
+                                int(msg[4]),
+                                int(msg[5]),
+                            )
+                for cam_i, text in pl.pump_decodes():
+                    self._on_decoded(cam_i, text)
+            self._refresh_mp_recording_and_preview()
+            self._update_tray_icon_for_pipeline_health()
+        except Exception:
+            log_session_error(
+                "Lỗi trong _mp_service_tick (camera MP) — app không thoát.",
+                exc_info=True,
+            )
 
     def _refresh_mp_recording_and_preview(self) -> None:
         """Cập nhật preview / buffer ghi từ SharedMemory (không qua Signal)."""
         preview_dt = 1.0 / 30.0
+        if not self.isVisible() and self._config.minimize_to_tray:
+            preview_dt = 2.0
         now = time.monotonic()
         if self._config.multi_camera_mode == "stations":
             for cam_idx, cols in self._preview_targets.items():
@@ -587,8 +815,12 @@ class MainWindow(QMainWindow):
                     pl = self._mp_pipelines.get(cam)
                     if pl is None or not pl.is_ready:
                         continue
+                    last = self._mp_preview_last_mono.get(cam, 0.0)
+                    if now - last < preview_dt:
+                        continue
                     bgr = pl.copy_latest_full_bgr_bytes()
                     if bgr:
+                        self._mp_preview_last_mono[cam] = now
                         self._pip_last_frame[cam] = bgr
         elif self._config.multi_camera_mode == "single":
             cam = self._config.camera_index
@@ -613,22 +845,6 @@ class MainWindow(QMainWindow):
                     self._latest_record_bgr[sid] = bgr
 
     def _on_worker_preview(self, cam_idx: int, bgr: bytes) -> None:
-        # region agent log
-        if self._debug_preview_logs_left > 0:
-            self._debug_preview_logs_left -= 1
-            try:
-                from packrecorder.debug_ndjson import dbg
-
-                dbg(
-                    "H4",
-                    "main_window._on_worker_preview",
-                    "enter",
-                    cam_idx=cam_idx,
-                    bgr_len=len(bgr) if bgr is not None else -1,
-                )
-            except Exception:
-                pass
-        # endregion agent log
         if self._config.multi_camera_mode != "stations":
             return
         cols = self._preview_targets.get(cam_idx)
@@ -638,43 +854,84 @@ class MainWindow(QMainWindow):
         if not wh:
             return
         w, h = wh
-        for col in cols:
-            self._dual_panel.set_preview_column(col, bgr, w, h)
+        # Defer ra tick kế tiếp của event loop — tránh chồng tick MP + paint (log #39: crash sau H6, trước paint)
+        self._pending_station_preview[cam_idx] = (bytes(bgr), int(w), int(h))
+        if not self._station_preview_flush_scheduled:
+            self._station_preview_flush_scheduled = True
+            QTimer.singleShot(0, self._flush_pending_station_previews)
+
+    def _flush_pending_station_previews(self) -> None:
+        self._station_preview_flush_scheduled = False
+        pending = self._pending_station_preview
+        self._pending_station_preview = {}
+        if self._config.multi_camera_mode != "stations":
+            return
+        for cam_idx, (bgr, fw, fh) in pending.items():
+            cols = self._preview_targets.get(cam_idx)
+            if not cols:
+                continue
+            wh = self._pip_wh.get(cam_idx)
+            if wh is None or int(wh[0]) != fw or int(wh[1]) != fh:
+                continue
+            w, h = int(wh[0]), int(wh[1])
+            for col in cols:
+                self._dual_panel.set_preview_column(col, bgr, w, h)
 
     def _on_serial_decoded(self, station_id: str, text: str) -> None:
-        self._note_user_activity()
-        if self._shutdown_countdown and self._countdown_dialog is not None:
-            return
-        text = normalize_manual_order_text(text)
-        if not text:
-            return
-        # Chỉ khi không đang ghi: bỏ qua lần gửi thứ 2 cùng mã trong cửa sổ ngắn (wedge/COM nhảy đôi).
-        # Khi đang ghi, mọi lần quét phải tới state machine (dừng / v.v.) — không chặn.
-        now = time.monotonic()
-        if not self._recorders.get(station_id):
-            last = self._serial_submit_debounce.get(station_id)
-            if (
-                last
-                and last[0] == text
-                and (now - last[1]) < _SERIAL_SAME_CODE_DEBOUNCE_S
-            ):
+        try:
+            self._note_user_activity()
+            if self._shutdown_countdown and self._countdown_dialog is not None:
                 return
-        self._serial_submit_debounce[station_id] = (text, now)
-        st = self._station_by_id(station_id)
-        if st is not None:
-            short = text if len(text) <= 64 else text[:61] + "…"
-            self._status.showMessage(
-                f"[{st.packer_label}] Máy quét COM: {short}",
-                5000,
+            text = normalize_manual_order_text(text)
+            if not text:
+                return
+            # Chỉ khi không đang ghi: bỏ qua lần gửi thứ 2 cùng mã trong cửa sổ ngắn (wedge/COM nhảy đôi).
+            # Khi đang ghi, mọi lần quét phải tới state machine (dừng / v.v.) — không chặn.
+            now = time.monotonic()
+            if not self._recorders.get(station_id):
+                last = self._serial_submit_debounce.get(station_id)
+                if (
+                    last
+                    and last[0] == text
+                    and (now - last[1]) < _SERIAL_SAME_CODE_DEBOUNCE_S
+                ):
+                    return
+            self._serial_submit_debounce[station_id] = (text, now)
+            st = self._station_by_id(station_id)
+            if st is not None:
+                short = text if len(text) <= 64 else text[:61] + "…"
+                self._status.showMessage(
+                    f"[{st.packer_label}] Máy quét COM: {short}",
+                    5000,
+                )
+            col = self._station_column(station_id)
+            if col is not None:
+                self._dual_panel.set_manual_order_text(col, text)
+            self._handle_decode_station(station_id, text)
+            if col is not None:
+                self._dual_panel.clear_manual_order_column(col)
+        except Exception:
+            import sys
+
+            log_session_error(
+                "Lỗi trong _on_serial_decoded (COM / UI / decode).",
+                exc_info=sys.exc_info(),
             )
-        self._handle_decode_station(station_id, text)
 
     def _on_worker_capture_failed(self, cam_idx: int, message: str) -> None:
-        if cam_idx in self._rtsp_error_shown:
-            return
-        self._rtsp_error_shown.add(cam_idx)
-        self._status.showMessage(message, 8000)
-        QMessageBox.warning(self, "Lỗi kết nối RTSP", message)
+        """Chỉ gọi khi RTSP + USB fallback đều thất bại (không báo khi đang chuyển sang USB).
+
+        Chỉ báo trên thanh trạng thái + icon khay — không hiện popup (theo yêu cầu vận hành).
+        """
+        del cam_idx  # giữ chữ ký tín hiệu ScanWorker/MP
+        try:
+            self._status.showMessage(message, 12000)
+            self._set_tray_icon_error()
+        except Exception:
+            log_session_error(
+                "Lỗi trong _on_worker_capture_failed — app không thoát.",
+                exc_info=True,
+            )
 
     def _on_serial_failed(self, station_id: str, message: str) -> None:
         st = self._station_by_id(station_id)
@@ -955,6 +1212,12 @@ class MainWindow(QMainWindow):
         primary_root = str(Path(self._config.video_root).resolve())
         backup_opt = (self._config.video_backup_root or "").strip()
         st_s = "synced" if meta["tag"] == "primary" else "pending_upload"
+        duration_s = 0.0
+        try:
+            started_dt = datetime.fromisoformat(str(meta["started"]))
+            duration_s = max(0.0, (datetime.now() - started_dt).total_seconds())
+        except (TypeError, ValueError):
+            duration_s = 0.0
         try:
             self._recording_index.insert(
                 order_id=meta["order"],
@@ -965,6 +1228,7 @@ class MainWindow(QMainWindow):
                 backup_root=backup_opt or None,
                 resolved_path=str(Path(meta["out"]).resolve()),
                 created_at=meta["started"],
+                duration_seconds=duration_s,
             )
         except OSError as e:
             log_session_error(f"recording_index.insert failed: {e}")
@@ -1013,34 +1277,8 @@ class MainWindow(QMainWindow):
     def _restart_scan_workers(self) -> None:
         if self._restart_in_progress:
             self._restart_pending = True
-            # region agent log
-            try:
-                from packrecorder.debug_ndjson import dbg
-
-                dbg(
-                    "H3",
-                    "main_window._restart_scan_workers",
-                    "coalesced_restart",
-                )
-            except Exception:
-                pass
-            # endregion agent log
             return
         self._restart_in_progress = True
-        # region agent log
-        try:
-            from packrecorder.debug_ndjson import dbg
-
-            dbg(
-                "H3",
-                "main_window._restart_scan_workers",
-                "start",
-                mode=self._config.multi_camera_mode,
-                required=sorted(self._required_camera_indices()),
-            )
-        except Exception:
-            pass
-        # endregion agent log
         try:
             self._pip_timer.stop()
             self._stop_serial_workers()
@@ -1058,25 +1296,11 @@ class MainWindow(QMainWindow):
             self._workers.clear()
             self._camera_fps.clear()
             self._serial_submit_debounce.clear()
-            self._rtsp_error_shown.clear()
             self._pip_last_frame.clear()
             self._preview_targets.clear()
             if self._config.multi_camera_mode == "stations":
                 self._dual_panel.clear_previews()
             if alive:
-                # region agent log
-                try:
-                    from packrecorder.debug_ndjson import dbg
-
-                    dbg(
-                        "H3",
-                        "main_window._restart_scan_workers",
-                        "old_workers_still_alive",
-                        alive=alive,
-                    )
-                except Exception:
-                    pass
-                # endregion agent log
                 self._restart_pending = True
                 QTimer.singleShot(300, self._restart_scan_workers)
                 return
@@ -1157,27 +1381,19 @@ class MainWindow(QMainWindow):
                         port,
                         baudrate=st.scanner_serial_baud,
                     )
-                    sw.line_decoded.connect(self._on_serial_decoded)
-                    sw.failed.connect(self._on_serial_failed)
+                    sw.line_decoded.connect(
+                        self._on_serial_decoded,
+                        Qt.ConnectionType.QueuedConnection,
+                    )
+                    sw.failed.connect(
+                        self._on_serial_failed,
+                        Qt.ConnectionType.QueuedConnection,
+                    )
                     sw.start()
                     self._serial_workers[st.station_id] = sw
 
             if self._config.multi_camera_mode == "stations":
                 self._rebuild_preview_targets()
-            # region agent log
-            try:
-                from packrecorder.debug_ndjson import dbg
-
-                dbg(
-                    "H3",
-                    "main_window._restart_scan_workers",
-                    "done",
-                    workers=len(self._workers),
-                    mp_pipelines=len(self._mp_pipelines),
-                )
-            except Exception:
-                pass
-            # endregion agent log
         finally:
             self._restart_in_progress = False
             if self._restart_pending:
@@ -1222,6 +1438,16 @@ class MainWindow(QMainWindow):
             if s.station_id == station_id:
                 return i
         return None
+
+    def _show_station_order_pending(self, station_id: str, order: str) -> None:
+        col = self._station_column(station_id)
+        if col is not None:
+            self._dual_panel.set_column_order_pending(col, order)
+
+    def _clear_station_order_pending(self, station_id: str) -> None:
+        col = self._station_column(station_id)
+        if col is not None:
+            self._dual_panel.set_column_order_pending(col, None)
 
     def _recording_src_short(self, st: StationConfig) -> str:
         if station_uses_serial_scanner(st):
@@ -1596,6 +1822,7 @@ class MainWindow(QMainWindow):
             now_mono=time.monotonic(),
         )
         if r.should_start_recording and r.new_active_order:
+            self._show_station_order_pending(station_id, r.new_active_order)
             self._begin_recording_station(station_id, r.new_active_order)
         if r.should_stop_recording:
             self._stop_recording_after_scan(station_id, r)
@@ -1603,6 +1830,7 @@ class MainWindow(QMainWindow):
     def _begin_recording_station(self, station_id: str, order: str) -> None:
         st = self._station_by_id(station_id)
         if st is None:
+            self._clear_station_order_pending(station_id)
             return
         primary = Path(self._config.video_root)
         bo = (self._config.video_backup_root or "").strip()
@@ -1612,16 +1840,29 @@ class MainWindow(QMainWindow):
         except OSError as e:
             QMessageBox.warning(self, "Lưu trữ", str(e))
             self._order_sm[station_id] = OrderStateMachine()
+            self._clear_station_order_pending(station_id)
+            return
+        t0 = datetime.now()
+        if is_duplicate_order(write_root, order, t0.date()):
+            short = order if len(order) <= 48 else order[:45] + "…"
+            self._status.showMessage(
+                f"Trùng đơn: đã có video cho mã {short} trong ngày {t0.date().isoformat()} — không ghi thêm.",
+                8000,
+            )
+            self._feedback.play_duplicate_order_alert()
+            send_duplicate_order_notice(order, st.packer_label)
+            self._order_sm[station_id] = OrderStateMachine()
+            self._clear_station_order_pending(station_id)
             return
         try:
             ff = _resolve_ffmpeg(self._config)
         except FileNotFoundError:
             self._show_ffmpeg_missing_dialog()
             self._order_sm[station_id] = OrderStateMachine()
+            self._clear_station_order_pending(station_id)
             return
         w, h = self._recording_dims_for_station(st)
         fps_out = max(1, min(60, int(self._config.record_fps)))
-        t0 = datetime.now()
         out = build_output_path(write_root, order, st.packer_label, t0)
         rel_key = out.relative_to(write_root).as_posix()
         meta = {
@@ -1676,6 +1917,7 @@ class MainWindow(QMainWindow):
             except OSError as e:
                 QMessageBox.warning(self, "Không bắt đầu ghi được", str(e))
                 self._order_sm[station_id] = OrderStateMachine()
+                self._clear_station_order_pending(station_id)
                 return
             self._recorders[station_id] = handle
             self._recording_write_meta[station_id] = meta
@@ -1694,6 +1936,7 @@ class MainWindow(QMainWindow):
             except Exception as e:  # noqa: BLE001
                 QMessageBox.warning(self, "Không bắt đầu ghi được", str(e))
                 self._order_sm[station_id] = OrderStateMachine()
+                self._clear_station_order_pending(station_id)
                 return
             self._recorders[station_id] = rec
             self._recording_write_meta[station_id] = meta
@@ -1723,6 +1966,7 @@ class MainWindow(QMainWindow):
         self._sync_recording_elapsed_timer()
         self._feedback.play_short()
         self._refresh_preview_roi_locks()
+        self._maybe_tray_toast_order(order)
 
     def _begin_recording_pip(self, order: str) -> None:
         primary = Path(self._config.video_root)
@@ -1734,13 +1978,23 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Lưu trữ", str(e))
             self._order_sm["pip"] = OrderStateMachine()
             return
+        t0 = datetime.now()
+        if is_duplicate_order(write_root, order, t0.date()):
+            short = order if len(order) <= 48 else order[:45] + "…"
+            self._status.showMessage(
+                f"Trùng đơn: đã có video cho mã {short} trong ngày {t0.date().isoformat()} — không ghi thêm.",
+                8000,
+            )
+            self._feedback.play_duplicate_order_alert()
+            send_duplicate_order_notice(order, self._config.packer_label)
+            self._order_sm["pip"] = OrderStateMachine()
+            return
         try:
             ff = _resolve_ffmpeg(self._config)
         except FileNotFoundError:
             self._show_ffmpeg_missing_dialog()
             self._order_sm["pip"] = OrderStateMachine()
             return
-        t0 = datetime.now()
         out = build_output_path(
             write_root, order, self._config.packer_label, t0
         )
@@ -1787,6 +2041,7 @@ class MainWindow(QMainWindow):
         if pip_sm is not None:
             pip_sm.mark_recording_started(time.monotonic())
         self._feedback.play_short()
+        self._maybe_tray_toast_order(order)
 
     def _stop_recording_for_station(self, station_id: str) -> None:
         if self._config.multi_camera_mode == "pip" and station_id == "pip":
@@ -1861,6 +2116,7 @@ class MainWindow(QMainWindow):
             if self._config.multi_camera_mode == "pip":
                 self._begin_recording_pip(nr.new_active_order)
             else:
+                self._show_station_order_pending(station_id, nr.new_active_order)
                 self._begin_recording_station(station_id, nr.new_active_order)
         else:
             if self._config.multi_camera_mode == "stations":
@@ -1920,6 +2176,34 @@ class MainWindow(QMainWindow):
                 f"Mở thủ công trong Explorer:\n{p.parent}",
             )
 
+    def _on_test_notification(self, source: str) -> None:
+        """Thử phát âm / khay từ Cài đặt — không lưu dialog; không đổi sound_mode đã lưu."""
+        try:
+            self._note_user_activity()
+            if source == "tray":
+                if self._tray is not None:
+                    self._tray.showMessage(
+                        "Pack Recorder",
+                        "Thử thông báo khay",
+                        QSystemTrayIcon.MessageIcon.Information,
+                        4000,
+                    )
+                else:
+                    self._status.showMessage(
+                        "Thử thông báo khay — bật «Thu vào khay hệ thống» để có icon khay.",
+                        6000,
+                    )
+                return
+            if source in ("speaker", "scanner_host"):
+                self._feedback.play_test_short_for_mode(source)
+        except Exception:
+            import sys
+
+            log_session_error(
+                "Lỗi trong _on_test_notification (thử âm / khay).",
+                exc_info=sys.exc_info(),
+            )
+
     def _open_settings(self) -> None:
         self._note_user_activity()
         if any(r is not None for r in self._recorders.values()):
@@ -1930,7 +2214,11 @@ class MainWindow(QMainWindow):
             )
             return
         self._pause_scan_workers()
-        dlg = SettingsDialog(self._config, self)
+        dlg = SettingsDialog(
+            self._config,
+            self,
+            on_test_notification=self._on_test_notification,
+        )
         try:
             if dlg.exec():
                 self._config = dlg.result_config()
@@ -1955,6 +2243,12 @@ class MainWindow(QMainWindow):
                 self._update_central_page()
                 self._sync_record_resolution_combo_from_config()
                 self._sync_always_on_top_from_config()
+                self._setup_system_tray()
+                self._restart_tray_health_timer()
+                qa = QApplication.instance()
+                if qa is not None:
+                    tray_ok = self._config.minimize_to_tray and self._tray is not None
+                    qa.setQuitOnLastWindowClosed(not tray_ok)
         finally:
             self._restart_scan_workers()
 
@@ -2002,21 +2296,23 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        app = QApplication.instance()
-        if app is not None:
-            try:
-                app.removeEventFilter(self)
-            except Exception:
-                pass
-        if self._sync_worker is not None:
-            self._sync_worker.stop_worker()
-            self._sync_worker.wait(4000)
-            self._sync_worker = None
-        self._close_recording_index()
-        mark_session_phase(
-            "MainWindow.closeEvent — cửa sổ chính đóng (thường: bấm X / Alt+F4; "
-            "hoặc môi trường chạy kết thúc tiến trình; không phải lỗi nếu bạn chủ động thoát)."
-        )
-        self._stop_all_recording_for_shutdown()
-        self._cleanup_workers()
+        if self._shutdown_done:
+            super().closeEvent(event)
+            return
+        if self._config.minimize_to_tray and self._config.close_to_tray:
+            if self._tray is None:
+                self._shutdown_application(reason="close_event_no_tray")
+                event.accept()
+                super().closeEvent(event)
+                return
+            event.ignore()
+            self.hide()
+            self._tray.showMessage(
+                "Pack Recorder",
+                "Ứng dụng vẫn chạy nền. Mở lại từ biểu tượng khay hệ thống.",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000,
+            )
+            return
+        self._shutdown_application(reason="close_event_default")
         super().closeEvent(event)

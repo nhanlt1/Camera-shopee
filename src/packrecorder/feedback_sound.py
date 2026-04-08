@@ -8,10 +8,11 @@ from PySide6.QtMultimedia import QSoundEffect
 
 from packrecorder.config import AppConfig
 from packrecorder.scanner_host_beep import NullScannerHostBeep, ScannerHostBeep
+from packrecorder.session_log import log_session_error
 
 
 class FeedbackPlayer:
-    """Âm báo: 1 tiếng = bắt đầu ghi; 2 tiếng = dừng ghi; 4 tiếng = trùng đơn."""
+    """Âm báo: 1 tiếng = bắt đầu ghi; 2 tiếng = dừng ghi; trùng đơn = tiếng báo lỗi hệ thống (Windows)."""
 
     def __init__(self, cfg: AppConfig, host_beep: ScannerHostBeep | None = None) -> None:
         self._cfg = cfg
@@ -50,6 +51,35 @@ class FeedbackPlayer:
             and self._cfg.sound_mode == "scanner_host"
         )
 
+    def play_test_short_for_mode(self, mode: str) -> None:
+        """Phát một bíp thử theo loa hoặc máy quét host — không ghi đè cấu hình đã lưu.
+
+        Không tạm thời gán ``self._cfg`` (tránh xung đột với timer / ``update_config``).
+        """
+        try:
+            if not self._cfg.sound_enabled:
+                return
+            if mode not in ("speaker", "scanner_host"):
+                return
+            if mode == "scanner_host":
+                self._ensure_sound_effects()
+                self._host.play_short()
+                return
+            self._ensure_sound_effects()
+            if self._short is not None and self._short.source().isValid():
+                self._short.play()
+            elif sys.platform == "win32":
+                import winsound
+
+                winsound.Beep(880, self._cfg.beep_short_ms)
+            else:
+                print("\a", end="", flush=True)
+        except Exception:
+            log_session_error(
+                "Lỗi play_test_short_for_mode (QSoundEffect / beep).",
+                exc_info=sys.exc_info(),
+            )
+
     def play_short(self) -> None:
         if not self._cfg.sound_enabled:
             return
@@ -77,9 +107,24 @@ class FeedbackPlayer:
         gap = max(10, self._cfg.beep_gap_ms)
         QTimer.singleShot(gap, self.play_short)
 
-    def play_quad(self) -> None:
-        """Bốn tiếng ngắn liên tiếp — đơn đã có video hôm nay (trùng đơn)."""
+    def play_duplicate_order_alert(self) -> None:
+        """Trùng đơn: dùng tiếng «báo lỗi» mặc định của Windows (MessageBeep)."""
         if not self._cfg.sound_enabled:
+            return
+        if sys.platform == "win32":
+            import winsound
+
+            gap = max(80, self._cfg.beep_gap_ms)
+
+            def hand() -> None:
+                try:
+                    winsound.MessageBeep(winsound.MB_ICONHAND)
+                except Exception:
+                    winsound.Beep(440, max(50, self._cfg.beep_long_ms))
+
+            hand()
+            QTimer.singleShot(gap, hand)
+            QTimer.singleShot(gap * 2, hand)
             return
         self._ensure_sound_effects()
         if self._use_host():
@@ -87,6 +132,10 @@ class FeedbackPlayer:
             return
         gap = max(10, self._cfg.beep_gap_ms)
         self._schedule_short_burst(4, gap)
+
+    def play_quad(self) -> None:
+        """Tương thích cũ — ưu tiên tiếng hệ thống trên Windows."""
+        self.play_duplicate_order_alert()
 
     def _schedule_short_burst(self, count: int, gap_ms: int) -> None:
         if count <= 0:
@@ -111,5 +160,24 @@ class FeedbackPlayer:
             import winsound
 
             winsound.Beep(440, self._cfg.beep_long_ms)
+        else:
+            print("\a", end="", flush=True)
+
+    def play_health_ping(self, volume: float) -> None:
+        """Very quiet periodic OK signal when running in tray (volume 0..1)."""
+        if not self._cfg.sound_enabled:
+            return
+        v = max(0.0, min(1.0, float(volume)))
+        if v <= 0.01:
+            return
+        if self._use_host():
+            self.play_short()
+            return
+        if sys.platform == "win32":
+            import winsound
+
+            ms = max(20, int(35 + 45 * v))
+            freq = int(520 + 180 * v)
+            winsound.Beep(freq, ms)
         else:
             print("\a", end="", flush=True)

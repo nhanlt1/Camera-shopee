@@ -8,11 +8,11 @@ from multiprocessing.synchronize import Event
 from queue import Empty
 from typing import Optional
 
-import cv2
-
 from packrecorder.barcode_decode import decode_barcodes_bgr
 from packrecorder.ipc.frame_ring import attach_ring_shm, ndarray_slot
 from packrecorder.opencv_video import configure_opencv_logging
+
+import cv2
 from packrecorder.record_roi import crop_bgr_frame, norm_to_pixels
 
 

@@ -16,10 +16,100 @@ from packrecorder.config import (
 )
 
 
+def test_tray_background_fields_defaults() -> None:
+    c = normalize_config(AppConfig())
+    assert c.minimize_to_tray is False
+    assert c.start_in_tray is False
+    assert c.close_to_tray is True
+    assert c.low_process_priority is False
+    assert c.tray_show_toast_on_order is True
+    assert c.tray_health_beep_interval_min == 0
+    assert 0.0 <= c.tray_health_beep_volume <= 1.0
+    assert c.enable_global_barcode_hook is False
+    assert c.scanner_com_only is True
+
+
+def test_scanner_usb_vid_pid_roundtrip_and_normalize(tmp_path: Path) -> None:
+    p = tmp_path / "c.json"
+    st = [
+        StationConfig(
+            "a1",
+            "Máy A",
+            0,
+            0,
+            scanner_usb_vid="0x0c2e",
+            scanner_usb_pid="0b61",
+        ),
+        StationConfig(
+            "b2",
+            "Máy B",
+            1,
+            1,
+            scanner_usb_vid="ZZZZ",
+            scanner_usb_pid="12345",
+        ),
+    ]
+    save_config(p, AppConfig(multi_camera_mode="stations", stations=st))
+    c2 = load_config(p)
+    assert c2.stations[0].scanner_usb_vid == "0C2E"
+    assert c2.stations[0].scanner_usb_pid == "0B61"
+    assert c2.stations[1].scanner_usb_vid == ""
+    assert c2.stations[1].scanner_usb_pid == ""
+
+
+def test_scanner_com_only_disables_global_hook() -> None:
+    c = normalize_config(
+        AppConfig(scanner_com_only=True, enable_global_barcode_hook=True)
+    )
+    assert c.scanner_com_only is True
+    assert c.enable_global_barcode_hook is False
+
+
+def test_start_in_tray_requires_minimize_to_tray() -> None:
+    c = normalize_config(AppConfig(minimize_to_tray=False, start_in_tray=True))
+    assert c.start_in_tray is False
+
+
+def test_tray_fields_roundtrip(tmp_path: Path) -> None:
+    p = tmp_path / "c.json"
+    c = AppConfig(
+        video_root=str(tmp_path / "v"),
+        minimize_to_tray=True,
+        start_in_tray=True,
+        close_to_tray=False,
+        tray_health_beep_interval_min=10,
+        tray_health_beep_volume=0.25,
+    )
+    save_config(p, c)
+    c2 = load_config(p)
+    assert c2.minimize_to_tray is True
+    assert c2.start_in_tray is True
+    assert c2.close_to_tray is False
+    assert c2.tray_health_beep_interval_min == 10
+    assert abs(c2.tray_health_beep_volume - 0.25) < 1e-6
+
+
+def test_disable_mp_via_env(monkeypatch) -> None:
+    monkeypatch.setenv("PACKRECORDER_DISABLE_MP", "1")
+    c = normalize_config(AppConfig(use_multiprocessing_camera_pipeline=True))
+    assert c.use_multiprocessing_camera_pipeline is False
+
+
+def test_use_multiprocessing_roundtrip(tmp_path: Path) -> None:
+    p = tmp_path / "c.json"
+    c = AppConfig(
+        video_root=str(tmp_path / "v"),
+        use_multiprocessing_camera_pipeline=False,
+    )
+    save_config(p, c)
+    c2 = load_config(p)
+    assert c2.use_multiprocessing_camera_pipeline is False
+
+
 def test_default_record_resolution_and_encoding():
     c = AppConfig()
     c = normalize_config(c)
-    assert c.use_multiprocessing_camera_pipeline is False
+    assert c.use_multiprocessing_camera_pipeline is True
     assert c.record_resolution == "hd"
     assert c.record_fps == 30
     assert c.record_video_codec == "h264"
@@ -56,7 +146,8 @@ def test_ha_fields_roundtrip(tmp_path: Path) -> None:
     c2 = load_config(p)
     assert c2.video_retention_keep_days == 30
     assert c2.video_backup_root == str(tmp_path / "bak")
-    assert c2.remote_status_json_path == "Z:/Drive/status.json"
+    assert c2.status_json_relative == "PackRecorder/status.json"
+    assert Path(c2.remote_status_json_path) == tmp_path / "v" / "PackRecorder" / "status.json"
 
 
 def test_record_roi_norm_roundtrip(tmp_path: Path):

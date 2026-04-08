@@ -10,7 +10,6 @@ from multiprocessing.synchronize import Event
 from queue import Full
 from typing import Optional, Union
 
-import cv2
 import numpy as np
 
 from packrecorder.ipc.frame_ring import create_ring_shm, ndarray_slot
@@ -20,6 +19,8 @@ from packrecorder.opencv_video import (
     open_video_capture,
 )
 from packrecorder.record_resolution import apply_capture_resolution
+
+import cv2
 
 _PREVIEW_WARMUP_DISCARD_FRAMES = 0
 _FALLBACK_CAPTURE_FPS = 30
@@ -54,30 +55,37 @@ def mp_capture_worker_entry(
     cap: Optional[cv2.VideoCapture] = None
     try:
         if isinstance(capture_source, str):
-            cap = open_rtsp_capture(capture_source)
+            try:
+                cap = open_rtsp_capture(capture_source)
+            except Exception:
+                cap = None
+            if cap is None:
+                cap = cv2.VideoCapture()
         else:
             cap = open_video_capture(int(capture_source))
-        if (
-            isinstance(capture_source, str)
-            and (cap is None or not cap.isOpened())
-            and fallback_usb_index is not None
-        ):
-            msg = (
-                f"Không mở được RTSP, tự chuyển sang webcam {int(fallback_usb_index)}."
-            )
-            events_queue.put(("capture_failed", camera_index, msg))
+        if isinstance(capture_source, str) and (cap is None or not cap.isOpened()):
             try:
                 if cap is not None:
                     cap.release()
             except Exception:
                 pass
-            cap = open_video_capture(int(fallback_usb_index))
+            if fallback_usb_index is not None:
+                cap = open_video_capture(int(fallback_usb_index))
+            else:
+                events_queue.put(
+                    (
+                        "capture_failed",
+                        camera_index,
+                        "Không mở được RTSP (không có webcam dự phòng).",
+                    )
+                )
+                return
         if cap is None or not cap.isOpened():
             events_queue.put(
                 (
                     "capture_failed",
                     camera_index,
-                    "Không mở được camera.",
+                    "Không mở được RTSP và webcam dự phòng (USB). Kiểm tra URL/mạng và chỉ số webcam.",
                 )
             )
             return

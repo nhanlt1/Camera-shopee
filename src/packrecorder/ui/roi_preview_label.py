@@ -11,7 +11,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
-import cv2
+import packrecorder.opencv_video  # noqa: F401
 
 from packrecorder.record_roi import clamp_norm_rect, norm_to_pixels, pixels_to_norm
 
@@ -156,11 +156,13 @@ class RoiPreviewLabel(QWidget):
         return (px / self._src_w, py / self._src_h)
 
     def paintEvent(self, event) -> None:  # noqa: ANN001
-        del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         tw, th = self._dest_size()
         canvas = QPixmap(tw, th)
+        if canvas.isNull():
+            super().paintEvent(event)
+            return
         canvas.fill(QColor(0x1A, 0x1A, 0x1A))
         cp = QPainter(canvas)
         if self._bgr is not None and self._src_w > 0 and self._src_h > 0:
@@ -168,12 +170,12 @@ class RoiPreviewLabel(QWidget):
                 bgr = np.frombuffer(self._bgr, dtype=np.uint8).reshape(
                     (self._src_h, self._src_w, 3)
                 )
-                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                rgb = np.ascontiguousarray(rgb)
+                # BGR→RGB bằng NumPy (tránh cv2.cvtColor trong paint — có thể crash native SIMD)
+                rgb = np.ascontiguousarray(bgr[:, :, ::-1])
                 h, w = rgb.shape[:2]
                 qimg = QImage(
                     rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888
-                )
+                ).copy()
                 pix = QPixmap.fromImage(qimg)
                 mode = (
                     Qt.TransformationMode.FastTransformation
@@ -181,13 +183,17 @@ class RoiPreviewLabel(QWidget):
                     else Qt.TransformationMode.SmoothTransformation
                 )
                 sc, ox, oy, dw, dh = _letterbox_transform(w, h, tw, th)
+                # int(dw/dh) có thể = 0 khi vùng vẽ rất hẹp → scaled(0,*) crash native Qt
+                sdw = max(1, int(dw))
+                sdh = max(1, int(dh))
                 scaled = pix.scaled(
-                    int(dw),
-                    int(dh),
+                    sdw,
+                    sdh,
                     Qt.AspectRatioMode.IgnoreAspectRatio,
                     mode,
                 )
-                cp.drawPixmap(int(ox), int(oy), scaled)
+                if not scaled.isNull():
+                    cp.drawPixmap(int(ox), int(oy), scaled)
             except Exception:
                 pass
         r = self._roi_screen_rect_f()

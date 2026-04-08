@@ -25,6 +25,15 @@ _USB_NAME_TOKENS = (
     "wch.cn",
     "prolific",
 )
+_SCANNER_HINT_TOKENS = (
+    "scanner",
+    "barcode",
+    "usb serial",
+    "symbol",
+    "zebra",
+    "honeywell",
+    "datalogic",
+)
 
 
 def _port_likely_usb_uart(p: Any) -> bool:
@@ -70,6 +79,30 @@ def format_serial_port_label(p: Any) -> str:
         chunks.append(f"SN:{s}")
     body = " · ".join(chunks) if chunks else "Serial"
     return f"{dev} — {body}"
+
+
+def port_vid_pid_hex(p: Any) -> tuple[str, str]:
+    """Lấy VID/PID dạng HEX 4 ký tự từ pyserial ListPortInfo ('' nếu không có)."""
+    vid = getattr(p, "vid", None)
+    pid = getattr(p, "pid", None)
+    if isinstance(vid, int) and isinstance(pid, int):
+        return (f"{vid:04X}", f"{pid:04X}")
+    hw = (getattr(p, "hwid", None) or "").strip()
+    if hw and "VID_" in hw.upper():
+        m = re.search(r"VID_([0-9A-F]{4}).*PID_([0-9A-F]{4})", hw, re.I)
+        if m:
+            return (m.group(1).upper(), m.group(2).upper())
+    return ("", "")
+
+
+def vid_pid_by_device() -> dict[str, tuple[str, str]]:
+    out: dict[str, tuple[str, str]] = {}
+    for p in iter_raw_comports():
+        dev = (getattr(p, "device", None) or "").strip()
+        if not dev:
+            continue
+        out[dev] = port_vid_pid_hex(p)
+    return out
 
 
 def _port_sort_key(p: Any, can_open: bool) -> tuple:
@@ -146,3 +179,70 @@ def list_filtered_serial_ports(*, try_open_ports: bool = True) -> list[tuple[str
         seen.add(dev)
         out.append((dev, format_serial_port_label(p)))
     return out
+
+
+def _scanner_hint_score(p: Any) -> int:
+    text = " ".join(
+        (
+            str(getattr(p, "description", None) or ""),
+            str(getattr(p, "manufacturer", None) or ""),
+            str(getattr(p, "product", None) or ""),
+        )
+    ).lower()
+    return sum(1 for tk in _SCANNER_HINT_TOKENS if tk in text)
+
+
+def choose_serial_port(
+    *,
+    selected_port: str,
+    expected_vid: str = "",
+    expected_pid: str = "",
+    try_open_ports: bool = True,
+) -> tuple[str, bool]:
+    """Chọn cổng COM tốt nhất.
+
+    Ưu tiên:
+    1) Cổng đã chọn (nếu còn tồn tại).
+    2) Match VID/PID kỳ vọng.
+    3) Heuristic theo tên scanner/USB.
+    4) Fallback rỗng (camera decode).
+    Returns: (device, auto_detected).
+    """
+    sp = (selected_port or "").strip()
+    vid = (expected_vid or "").strip().upper().removeprefix("0X")
+    pid = (expected_pid or "").strip().upper().removeprefix("0X")
+    ports = iter_raw_comports()
+    if not ports:
+        return (sp, False) if sp else ("", False)
+    by_device = {(getattr(p, "device", None) or "").strip(): p for p in ports}
+    if sp and sp in by_device:
+        return (sp, False)
+
+    can_open: dict[str, bool] = {}
+    for p in ports:
+        dev = (getattr(p, "device", None) or "").strip()
+        if not dev:
+            continue
+        can_open[dev] = _try_open_port(dev) if try_open_ports else True
+    ordered = sorted(
+        ports,
+        key=lambda p: _port_sort_key(p, can_open.get(getattr(p, "device", ""), True)),
+    )
+
+    if len(vid) == 4 and len(pid) == 4:
+        for p in ordered:
+            pvid, ppid = port_vid_pid_hex(p)
+            if pvid == vid and ppid == pid:
+                dev = (getattr(p, "device", None) or "").strip()
+                if dev:
+                    return (dev, True)
+
+    hinted = [p for p in ordered if _scanner_hint_score(p) > 0]
+    if hinted:
+        dev = (getattr(hinted[0], "device", None) or "").strip()
+        if dev:
+            return (dev, True)
+
+    if sp:
+        return (sp, False)
+    return ("", False)
