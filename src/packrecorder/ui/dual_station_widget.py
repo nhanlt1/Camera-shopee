@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QSizePolicy,
@@ -23,6 +24,14 @@ from PySide6.QtWidgets import (
 
 from packrecorder.camera_probe import probe_opencv_camera_indices
 from packrecorder.config import AppConfig, StationConfig
+from packrecorder.hid_scanner_discovery import (
+    HID_POS_USAGE_PAGE,
+    device_label,
+    enumerate_hid_or_error,
+    filter_scanner_candidates,
+    list_usage_page_devices,
+    vid_pid_int_from_device,
+)
 from packrecorder.session_log import log_session_error
 from packrecorder.order_input import normalize_manual_order_text
 from packrecorder.serial_ports import (
@@ -31,6 +40,7 @@ from packrecorder.serial_ports import (
     list_filtered_serial_ports,
     vid_pid_by_device,
 )
+from packrecorder.ui.hid_pos_setup_wizard import HidPosSetupWizard
 from packrecorder.ui.roi_preview_label import RoiPreviewLabel
 
 # Giống placeholder: khi chọn RTSP lần đầu (ô trống), điền sẵn để sửa ngay, không phải gõ lại từng ký tự.
@@ -126,12 +136,20 @@ class DualStationWidget(QWidget):
         self._rtsp_connect_btn: list[QPushButton] = []
         self._rtsp_armed: list[bool] = [False, False]
         self._scanner: list[QComboBox] = []
+        self._scanner_input_kind: list[QComboBox] = []
+        self._hid_vid: list[QLineEdit] = []
+        self._hid_pid: list[QLineEdit] = []
         self._scanner_match_hint: list[QLabel] = []
         self._decode_hint: list[QLabel] = []
         self._name: list[QLineEdit] = []
         self._manual_col_order: list[QLineEdit] = []
         self._scanner_expected_vid_pid: list[tuple[str, str]] = [("", ""), ("", "")]
         self._scanner_com_only: bool = True
+        self._hid_row_widget: list[QWidget] = []
+        self._hid_block_widget: list[QWidget] = []
+        self._hid_device_combo: list[QComboBox] = []
+        self._hid_usage_label: list[QLabel] = []
+        self._tl_scan: list[QLabel] = []
 
         columns = QHBoxLayout()
         for col in range(2):
@@ -270,6 +288,33 @@ class DualStationWidget(QWidget):
             sc.currentIndexChanged.connect(lambda _i, c=col: self._on_scanner_or_decode_changed(c))
             self._scanner.append(sc)
 
+            sk = QComboBox()
+            sk.setMinimumWidth(200)
+            sk.addItem("USB–COM", "com")
+            sk.addItem("HID POS (VID/PID)", "hid_pos")
+            sk.setToolTip(
+                "USB–COM: máy quét dạng serial (cổng COM). "
+                "HID POS: đọc raw qua hidapi — chỉ cần VID/PID (pip: hidapi, kèm DLL Windows). "
+                "Không liên quan «chạy ngầm»: ẩn cửa sổ / icon khay bật trong Tệp → Cài đặt → Khay hệ thống."
+            )
+            sk.currentIndexChanged.connect(
+                lambda _i, c=col: self._on_scanner_input_kind_changed(c)
+            )
+            self._scanner_input_kind.append(sk)
+
+            hv = QLineEdit()
+            hv.setPlaceholderText("VID (HEX 4)")
+            hv.setMaxLength(4)
+            hv.textChanged.connect(lambda _t, c=col: self._emit_debounced())
+            hv.textChanged.connect(lambda _t, c=col: self._on_hid_vid_pid_changed(c))
+            hp = QLineEdit()
+            hp.setPlaceholderText("PID (HEX 4)")
+            hp.setMaxLength(4)
+            hp.textChanged.connect(lambda _t, c=col: self._emit_debounced())
+            hp.textChanged.connect(lambda _t, c=col: self._on_hid_vid_pid_changed(c))
+            self._hid_vid.append(hv)
+            self._hid_pid.append(hp)
+
             tl_scan = QLabel("Máy quét (USB–COM)")
             tl_scan.setToolTip(
                 "Mỗi cổng hiển thị tên thiết bị (Windows) + hãng + mã VID:PID khi có — "
@@ -277,6 +322,7 @@ class DualStationWidget(QWidget):
                 "Tốc độ Baud dùng mặc định trong cấu hình (thường 9600); cần khác thì chỉnh trong "
                 "tệp cấu hình JSON (không hiện nút trên UI để tránh chỉnh nhầm)."
             )
+            self._tl_scan.append(tl_scan)
 
             row_controls = QHBoxLayout()
             row_controls.setSpacing(10)
@@ -303,8 +349,60 @@ class DualStationWidget(QWidget):
             v_scan = QVBoxLayout()
             v_scan.setSpacing(4)
             v_scan.setContentsMargins(0, 0, 0, 0)
+            v_scan.addWidget(QLabel("Kiểu máy quét"))
+            v_scan.addWidget(sk)
             v_scan.addWidget(tl_scan)
             v_scan.addWidget(sc)
+            hid_row = QHBoxLayout()
+            hid_row.setSpacing(8)
+            hid_row.addWidget(hv, 1)
+            hid_row.addWidget(hp, 1)
+            hid_w = QWidget()
+            hid_w.setLayout(hid_row)
+            v_scan.addWidget(hid_w)
+            self._hid_row_widget.append(hid_w)
+
+            hid_tool_row = QHBoxLayout()
+            hid_tool_row.setSpacing(8)
+            hcb = QComboBox()
+            hcb.setMinimumWidth(160)
+            hcb.setToolTip(
+                "Danh sách thiết bị HID gần giống máy quét (tên / Usage Page 0x8C). "
+                "Chọn một mục để điền VID/PID — hoặc nhập tay bên dưới."
+            )
+            hcb.currentIndexChanged.connect(
+                lambda _i, c=col: self._on_hid_device_combo_changed(c)
+            )
+            btn_hid_refresh = QPushButton("Làm mới HID")
+            btn_hid_refresh.setToolTip("Quét lại danh sách thiết bị HID (cần cài packrecorder[hid]).")
+            btn_hid_refresh.clicked.connect(
+                lambda _checked=False, c=col: self._on_hid_refresh_clicked(c)
+            )
+            btn_hid_wizard = QPushButton("Thiết lập máy quét…")
+            btn_hid_wizard.setToolTip("Hướng dẫn từng bước: rút/cắm USB và chọn đúng máy quét.")
+            btn_hid_wizard.clicked.connect(
+                lambda _checked=False, c=col: self._open_hid_wizard(c)
+            )
+            hid_tool_row.addWidget(hcb, 1)
+            hid_tool_row.addWidget(btn_hid_refresh)
+            hid_tool_row.addWidget(btn_hid_wizard)
+            hid_tool_w = QWidget()
+            hid_tool_w.setLayout(hid_tool_row)
+            h_usage = QLabel("")
+            h_usage.setWordWrap(True)
+            h_usage.setStyleSheet("color:#1565c0;font-size:11px;")
+            h_usage.setVisible(False)
+            hid_block = QWidget()
+            hid_block_l = QVBoxLayout(hid_block)
+            hid_block_l.setContentsMargins(0, 0, 0, 0)
+            hid_block_l.setSpacing(4)
+            hid_block_l.addWidget(hid_tool_w)
+            hid_block_l.addWidget(h_usage)
+            v_scan.addWidget(hid_block)
+            self._hid_block_widget.append(hid_block)
+            self._hid_device_combo.append(hcb)
+            self._hid_usage_label.append(h_usage)
+
             sh = QLabel("")
             sh.setStyleSheet("color:#2e7d32;font-size:11px;")
             sh.setWordWrap(True)
@@ -604,6 +702,185 @@ class DualStationWidget(QWidget):
         self._repopulate_record_combo(1, r1)
         self._emit_debounced()
 
+    def _scanner_kind_data(self, col: int) -> str:
+        if not (0 <= col < len(self._scanner_input_kind)):
+            return "com"
+        d = self._scanner_input_kind[col].currentData()
+        return str(d or "com")
+
+    def _on_scanner_input_kind_changed(self, col: int, emit: bool = True) -> None:
+        if not (0 <= col < len(self._scanner_input_kind)):
+            return
+        kind = self._scanner_kind_data(col)
+        is_com = kind == "com"
+        self._scanner[col].setVisible(is_com)
+        self._hid_row_widget[col].setVisible(not is_com)
+        if 0 <= col < len(self._hid_block_widget):
+            self._hid_block_widget[col].setVisible(not is_com)
+        if not is_com:
+            self._repopulate_hid_device_combo(col)
+        if 0 <= col < len(self._tl_scan):
+            self._tl_scan[col].setText(
+                "Máy quét (USB–COM)" if is_com else "HID POS — VID & PID (HEX)"
+            )
+        if 0 <= col < len(self._decode_hint):
+            dh = self._decode_hint[col]
+            if is_com:
+                dh.setText(
+                    "Khi chọn cổng COM ở trên, mã vạch đọc từ máy quét USB–serial.\n"
+                    "Để trống COM thì dùng camera đọc mã (pyzbar) bên dưới."
+                )
+            else:
+                dh.setText(
+                    "HID POS — raw: app đọc mã qua hidapi (VID/PID); khi cửa sổ ẩn vẫn nhận nếu máy ở chế độ POS/raw. "
+                    "Ẩn cửa sổ / chỉ icon khay: Cài đặt → «Thu vào khay hệ thống» (không phải do chọn VID/PID). "
+                    "Máy ở chế độ bàn phím: quét vào ô «Mã đơn» rồi Enter hoặc «Bắt đầu ghi». "
+                    "Thiếu hidapi: pip install -e ."
+                )
+        if emit:
+            self._emit_debounced()
+        self._apply_manual_order_readonly()
+
+    def _on_hid_vid_pid_changed(self, col: int) -> None:
+        if self._scanner_kind_data(col) != "hid_pos":
+            return
+        v = self._hid_vid[col].text().strip().upper()
+        p = self._hid_pid[col].text().strip().upper()
+        if len(v) != 4 or len(p) != 4:
+            return
+        for oc in range(2):
+            if oc == col:
+                continue
+            if self._scanner_kind_data(oc) != "hid_pos":
+                continue
+            ov = self._hid_vid[oc].text().strip().upper()
+            op = self._hid_pid[oc].text().strip().upper()
+            if ov == v and op == p:
+                with QSignalBlocker(self._hid_vid[oc]):
+                    self._hid_vid[oc].clear()
+                with QSignalBlocker(self._hid_pid[oc]):
+                    self._hid_pid[oc].clear()
+
+    @staticmethod
+    def _hid_combo_key(v: int, p: int) -> str:
+        return f"{v:04X}:{p:04X}"
+
+    def _repopulate_hid_device_combo(self, col: int) -> None:
+        if not (0 <= col < len(self._hid_device_combo)):
+            return
+        combo = self._hid_device_combo[col]
+        usage_lbl = self._hid_usage_label[col]
+        raw, err = enumerate_hid_or_error()
+        with QSignalBlocker(combo):
+            combo.clear()
+            combo.addItem("(Chọn thủ công / nhập bên dưới)", None)
+            if err:
+                usage_lbl.setText(f"Không liệt kê HID: {err}")
+                usage_lbl.setVisible(True)
+                combo.setCurrentIndex(0)
+                return
+            assert raw is not None
+            pos_n = len(list_usage_page_devices(raw, HID_POS_USAGE_PAGE))
+            if pos_n == 0:
+                usage_lbl.setText(
+                    "Không thấy thiết bị Usage Page 0x8C (HID POS). Vẫn có thể chọn theo tên trong danh sách."
+                )
+            elif pos_n == 1:
+                usage_lbl.setText(
+                    "Gợi ý: 1 thiết bị HID POS (0x8C) — chọn trong danh sách nếu đúng máy quét."
+                )
+            else:
+                usage_lbl.setText(
+                    f"Gợi ý: {pos_n} thiết bị HID POS (0x8C) — chọn đúng dòng hoặc dùng «Thiết lập máy quét»."
+                )
+            usage_lbl.setVisible(True)
+            for d in filter_scanner_candidates(raw):
+                v, p = vid_pid_int_from_device(d)
+                combo.addItem(device_label(d), self._hid_combo_key(v, p))
+        vtxt = self._hid_vid[col].text().strip().upper()
+        ptxt = self._hid_pid[col].text().strip().upper()
+        if len(vtxt) == 4 and len(ptxt) == 4:
+            try:
+                v = int(vtxt, 16)
+                p = int(ptxt, 16)
+            except ValueError:
+                combo.setCurrentIndex(0)
+                return
+            idx = combo.findData(self._hid_combo_key(v, p))
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+        else:
+            combo.setCurrentIndex(0)
+
+    def _on_hid_device_combo_changed(self, col: int) -> None:
+        if self._scanner_kind_data(col) != "hid_pos":
+            return
+        if not (0 <= col < len(self._hid_device_combo)):
+            return
+        key = self._hid_device_combo[col].currentData()
+        if key is None or not isinstance(key, str):
+            return
+        parts = key.split(":", 1)
+        if len(parts) != 2:
+            return
+        try:
+            v = int(parts[0], 16)
+            p = int(parts[1], 16)
+        except ValueError:
+            return
+        with QSignalBlocker(self._hid_vid[col]):
+            self._hid_vid[col].setText(f"{v:04X}")
+        with QSignalBlocker(self._hid_pid[col]):
+            self._hid_pid[col].setText(f"{p:04X}")
+        self._on_hid_vid_pid_changed(col)
+        self._emit_debounced()
+
+    def _on_hid_refresh_clicked(self, col: int) -> None:
+        if self._scanner_kind_data(col) != "hid_pos":
+            return
+        raw, err = enumerate_hid_or_error()
+        if err:
+            QMessageBox.warning(self, "HID", err)
+            return
+        self._repopulate_hid_device_combo(col)
+
+    def _open_hid_wizard(self, col: int) -> None:
+        if self._scanner_kind_data(col) != "hid_pos":
+            return
+        w = HidPosSetupWizard(self)
+
+        def _apply(v: int, p: int) -> None:
+            with QSignalBlocker(self._hid_vid[col]):
+                self._hid_vid[col].setText(f"{v:04X}")
+            with QSignalBlocker(self._hid_pid[col]):
+                self._hid_pid[col].setText(f"{p:04X}")
+            self._on_hid_vid_pid_changed(col)
+            self._repopulate_hid_device_combo(col)
+            self._emit_debounced()
+
+        w.vid_pid_chosen.connect(_apply)
+        w.exec()
+
+    def _col_dedicated_scanner_active(self, col: int) -> bool:
+        if not (0 <= col < len(self._scanner_input_kind)):
+            return False
+        if self._scanner_kind_data(col) == "hid_pos":
+            v = self._hid_vid[col].text().strip()
+            p = self._hid_pid[col].text().strip()
+            return len(v) == 4 and len(p) == 4
+        port = self._scanner[col].currentData()
+        return bool(port and str(port).strip())
+
+    def _manual_order_readonly_for_col(self, col: int) -> bool:
+        """Chỉ khóa ô Mã đơn khi dùng COM có cổng (serial worker tự điền). HID POS / COM trống: mở để wedge hoặc camera."""
+        if not (0 <= col < len(self._scanner_input_kind)):
+            return False
+        if self._scanner_kind_data(col) == "hid_pos":
+            return False
+        if self._scanner_kind_data(col) == "com":
+            port = self._scanner[col].currentData()
+            return bool(port and str(port).strip())
+        return False
+
     def _on_scanner_or_decode_changed(self, col: int, emit: bool = True) -> None:
         port = self._scanner[col].currentData()
         use_serial = bool(port and str(port).strip())
@@ -623,12 +900,12 @@ class DualStationWidget(QWidget):
         self._apply_manual_order_readonly()
 
     def _apply_manual_order_readonly(self) -> None:
-        """Ô «Mã đơn» chỉ đọc khi quầy dùng máy quét COM — tránh wedge gõ nhầm ô máy khác."""
+        """Ô «Mã đơn» chỉ khóa khi COM có cổng. HID POS: mở — máy kiểu bàn phím gõ vào đây rồi Enter / Bắt đầu ghi."""
         try:
             for col in range(2):
-                port = self._scanner[col].currentData()
-                use_serial = bool(port and str(port).strip())
-                self._manual_col_order[col].setReadOnly(use_serial)
+                self._manual_col_order[col].setReadOnly(
+                    self._manual_order_readonly_for_col(col)
+                )
         except Exception:
             log_session_error(
                 "Lỗi trong _apply_manual_order_readonly.",
@@ -735,6 +1012,16 @@ class DualStationWidget(QWidget):
                 col=col,
                 probe_serial=not fast_serial_scan,
             )
+            skind = getattr(s, "scanner_input_kind", "com")
+            with QSignalBlocker(self._scanner_input_kind[col]):
+                sk_idx = self._scanner_input_kind[col].findData(skind)
+                if sk_idx >= 0:
+                    self._scanner_input_kind[col].setCurrentIndex(sk_idx)
+            with QSignalBlocker(self._hid_vid[col]):
+                self._hid_vid[col].setText((s.scanner_usb_vid or "").strip())
+            with QSignalBlocker(self._hid_pid[col]):
+                self._hid_pid[col].setText((s.scanner_usb_pid or "").strip())
+            self._on_scanner_input_kind_changed(col, emit=False)
             with QSignalBlocker(self._name[col]):
                 self._name[col].setText(s.packer_label)
             self._on_scanner_or_decode_changed(col, emit=False)
@@ -756,27 +1043,45 @@ class DualStationWidget(QWidget):
         self._apply_manual_order_readonly()
 
     def duplicate_scanner_ports(self) -> bool:
-        raw = [
-            str(self._scanner[i].currentData() or "").strip() for i in range(2)
-        ]
-        return bool(raw[0] and raw[0] == raw[1])
+        def key(col: int) -> tuple[str, str] | None:
+            if not (0 <= col < len(self._scanner_input_kind)):
+                return None
+            if self._scanner_kind_data(col) == "hid_pos":
+                v = self._hid_vid[col].text().strip().upper()
+                p = self._hid_pid[col].text().strip().upper()
+                if len(v) == 4 and len(p) == 4:
+                    return ("hid", f"{v}:{p}")
+                return None
+            raw = str(self._scanner[col].currentData() or "").strip()
+            if raw:
+                return ("com", raw)
+            return None
+
+        k0, k1 = key(0), key(1)
+        return k0 is not None and k0 == k1
 
     def apply_to_config(self, cfg: AppConfig) -> None:
         cfg.video_root = self._root.text().strip()
         vid_pid_map = vid_pid_by_device()
         for col in range(min(2, len(cfg.stations))):
             s = cfg.stations[col]
+            skind = str(self._scanner_input_kind[col].currentData() or "com")
             raw_port = self._scanner[col].currentData()
             port = ""
             if raw_port and str(raw_port).strip():
                 port = str(raw_port).strip()
-            cfg_vid = (s.scanner_usb_vid or "").strip().upper()
-            cfg_pid = (s.scanner_usb_pid or "").strip().upper()
-            if port and (not cfg_vid or not cfg_pid):
-                detected = vid_pid_map.get(port, ("", ""))
-                dvid, dpid = detected
-                if dvid and dpid:
-                    cfg_vid, cfg_pid = dvid, dpid
+            if skind == "hid_pos":
+                port = ""
+                cfg_vid = (self._hid_vid[col].text() or "").strip().upper()
+                cfg_pid = (self._hid_pid[col].text() or "").strip().upper()
+            else:
+                cfg_vid = (s.scanner_usb_vid or "").strip().upper()
+                cfg_pid = (s.scanner_usb_pid or "").strip().upper()
+                if port and (not cfg_vid or not cfg_pid):
+                    detected = vid_pid_map.get(port, ("", ""))
+                    dvid, dpid = detected
+                    if dvid and dpid:
+                        cfg_vid, cfg_pid = dvid, dpid
             kind = "rtsp" if self._record_kind[col].checkedId() == 1 else "usb"
             url = self._rtsp_url[col].text().strip()
             if kind == "rtsp" and (not url or not self._rtsp_armed[col]):
@@ -797,6 +1102,7 @@ class DualStationWidget(QWidget):
                 scanner_serial_baud=int(s.scanner_serial_baud),
                 scanner_usb_vid=cfg_vid,
                 scanner_usb_pid=cfg_pid,
+                scanner_input_kind="hid_pos" if skind == "hid_pos" else "com",
                 preview_display_index=-1,
                 record_roi_norm=self._preview[col].get_roi_norm(),
             )
@@ -939,11 +1245,10 @@ class DualStationWidget(QWidget):
             self.set_column_recording_timer(i, None)
 
     def has_decode_camera_collision(self) -> bool:
-        """Hai quầy cùng camera đọc mã (camera = mã nguồn) khi không dùng COM."""
+        """Hai quầy cùng camera đọc mã (camera = mã nguồn) khi không dùng COM/HID."""
         indices: list[int] = []
         for col in range(2):
-            port = self._scanner[col].currentData()
-            if port and str(port).strip():
+            if self._col_dedicated_scanner_active(col):
                 continue
             if self._rtsp_stream_active_in_ui(col):
                 indices.append(10 + col)
@@ -975,7 +1280,8 @@ class DualStationWidget(QWidget):
         if not (0 <= col < len(self._manual_col_order)):
             return
         if source == "enter" and self._scanner_com_only:
-            return
+            if self._scanner_kind_data(col) != "hid_pos":
+                return
         text = normalize_manual_order_text(self._manual_col_order[col].text())
         if not text:
             return

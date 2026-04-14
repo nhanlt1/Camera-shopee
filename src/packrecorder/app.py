@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import os
 import sys
 import time
@@ -11,6 +12,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QMainWindow
 
 from packrecorder.config import default_config_path, load_config
+from packrecorder.shm_cleanup import cleanup_stale_packrecorder_shm
 from packrecorder.session_log import (
     append_startup_hints,
     enable_native_crash_dump,
@@ -136,6 +138,13 @@ def run_app() -> int:
     mark_session_phase(
         f"QApplication + stylesheet ({time.monotonic() - t_qt:.3f}s)"
     )
+    try:
+        n_clean = cleanup_stale_packrecorder_shm()
+        if n_clean:
+            mark_session_phase(f"Đã dọn {n_clean} shm orphan (POSIX).")
+    except Exception:
+        pass
+    atexit.register(MainWindow.run_atexit_cleanup)
     with session_log_timed("Khởi tạo MainWindow()"):
         w = MainWindow()
     if w._config.low_process_priority:

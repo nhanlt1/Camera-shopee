@@ -50,7 +50,7 @@ _np_exceptions = Path(_np.__file__).resolve().parent / "_core" / "_exceptions.py
 if _np_exceptions.is_file():
     extra_datas.append((str(_np_exceptions), "numpy/_core"))
 
-for pkg in ("pyzbar", "cv2"):
+for pkg in ("pyzbar", "cv2", "hidapi"):
     try:
         binaries += collect_dynamic_libs(pkg)
     except Exception:
@@ -70,7 +70,12 @@ hiddenimports += [
     "pyzbar",
     "pyzbar.pyzbar",
     "serial",
+    "hid",
+    "hidapi",
     "packrecorder.barcode_decode",
+    "packrecorder.hid_scanner_discovery",
+    "packrecorder.hid_pos_scan_worker",
+    "packrecorder.hid_report_parse",
     "packrecorder.ipc",
     "packrecorder.ipc.capture_worker",
     "packrecorder.ipc.scanner_worker",

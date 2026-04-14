@@ -23,8 +23,17 @@ from packrecorder.session_log import append_session_log
 SERIAL_SCAN_QUEUE_MAX = 32
 # Không spam run_errors khi queue đầy liên tục.
 QUEUE_DROP_LOG_MIN_INTERVAL_S = 5.0
+# Mỗi lần SerialException hoặc không mở được port: backoff rồi thử lại; quá giới hạn → failed.
+MAX_SERIAL_TRANSPORT_FAILURES = 12
 
 QueueItem = Union[Tuple[str, str], None]
+
+
+def _serial_reopen_backoff_seconds(failure_index: int) -> float:
+    """failure_index từ 1: 0.25, 0.5, 1, 2, 4, 8 (trần 8s)."""
+    if failure_index <= 0:
+        return 0.25
+    return min(8.0, 0.25 * float(2 ** min(failure_index - 1, 5)))
 
 
 def put_scan_line_drop_oldest(
@@ -107,47 +116,74 @@ class SerialScanWorker(QThread):
             return
         if not self._port:
             return
-        try:
-            ser = serial.Serial(self._port, self._baudrate, timeout=0.12)
-        except Exception as e:  # noqa: BLE001
-            self.failed.emit(self._station_id, f"Không mở được {self._port}: {e}")
-            return
-        with self._serial_lock:
-            self._serial_port = ser
         last_text: Optional[str] = None
         last_mono = 0.0
         q = self._out_queue
         assert q is not None
-        try:
-            while not self._stop_event.is_set():
-                try:
-                    raw = ser.readline()
-                except serial.SerialException as e:
-                    self.failed.emit(self._station_id, str(e))
-                    break
-                if not raw:
-                    continue
-                text = raw.decode("utf-8", errors="replace").strip()
-                if not text:
-                    continue
-                now = time.monotonic()
-                if text == last_text and (now - last_mono) < self._debounce_s:
-                    continue
-                last_text = text
-                last_mono = now
-                put_scan_line_drop_oldest(
-                    q,
-                    self._station_id,
-                    text,
-                    on_drop=self._on_queue_drop,
-                )
-        finally:
-            with self._serial_lock:
-                self._serial_port = None
+        transport_failures = 0
+        ser: Optional["SerialHandle"] = None
+        while not self._stop_event.is_set():
             try:
-                ser.close()
-            except Exception:
-                pass
+                ser = serial.Serial(self._port, self._baudrate, timeout=0.12)
+            except Exception as e:  # noqa: BLE001
+                transport_failures += 1
+                if transport_failures > MAX_SERIAL_TRANSPORT_FAILURES:
+                    self.failed.emit(
+                        self._station_id,
+                        f"Không mở lại được {self._port}: {e}",
+                    )
+                    return
+                time.sleep(_serial_reopen_backoff_seconds(transport_failures))
+                continue
+            transport_failures = 0
+            with self._serial_lock:
+                self._serial_port = ser
+            try:
+                while not self._stop_event.is_set():
+                    try:
+                        raw = ser.readline()
+                    except serial.SerialException as e:
+                        transport_failures += 1
+                        with self._serial_lock:
+                            self._serial_port = None
+                        try:
+                            ser.close()
+                        except Exception:
+                            pass
+                        ser = None
+                        if transport_failures > MAX_SERIAL_TRANSPORT_FAILURES:
+                            self.failed.emit(self._station_id, str(e))
+                            return
+                        time.sleep(
+                            _serial_reopen_backoff_seconds(transport_failures)
+                        )
+                        break
+                    if not raw:
+                        continue
+                    text = raw.decode("utf-8", errors="replace").strip()
+                    if not text:
+                        continue
+                    transport_failures = 0
+                    now = time.monotonic()
+                    if text == last_text and (now - last_mono) < self._debounce_s:
+                        continue
+                    last_text = text
+                    last_mono = now
+                    put_scan_line_drop_oldest(
+                        q,
+                        self._station_id,
+                        text,
+                        on_drop=self._on_queue_drop,
+                    )
+            finally:
+                with self._serial_lock:
+                    self._serial_port = None
+                if ser is not None:
+                    try:
+                        ser.close()
+                    except Exception:
+                        pass
+                    ser = None
 
     def run(self) -> None:
         if serial is None:

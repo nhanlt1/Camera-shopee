@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import multiprocessing.shared_memory as sm
+import uuid
 from typing import Optional
 
 import numpy as np
+
+# Tiền tố tên shm để dọn orphan trên POSIX (/dev/shm) và tránh trùng tay đặt tên.
+SHM_NAME_PREFIX = "packrecorder_pr_"
 
 
 def slot_nbytes(height: int, width: int) -> int:
@@ -37,7 +41,8 @@ def ndarray_slot(
 
 def create_ring_shm(height: int, width: int, n_slots: int) -> sm.SharedMemory:
     size = ring_nbytes(height, width, n_slots)
-    return sm.SharedMemory(create=True, size=size)
+    name = f"{SHM_NAME_PREFIX}{uuid.uuid4().hex}"
+    return sm.SharedMemory(create=True, size=size, name=name)
 
 
 def attach_ring_shm(name: str) -> sm.SharedMemory:

@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from packrecorder.ipc.health import is_stale
 from packrecorder.ipc.capture_worker import mp_capture_worker_entry
 from packrecorder.ipc.frame_ring import attach_ring_shm, close_unlink, ndarray_slot
 from packrecorder.ipc.scanner_worker import mp_scanner_worker_entry
@@ -51,6 +52,8 @@ class MpCameraPipeline:
         self._latest_seq = self._ctx.Value("Q", 0)
         self._latest_slot = self._ctx.Value("i", 0)
         self._latest_lock = self._ctx.Lock()
+        self._hb_capture = self._ctx.Value("d", 0.0)
+        self._hb_scanner = self._ctx.Value("d", 0.0)
 
         self._cap_proc: Optional[mp.Process] = None
         self._scan_proc: Optional[mp.Process] = None
@@ -103,6 +106,7 @@ class MpCameraPipeline:
                 self._latest_seq,
                 self._latest_slot,
                 self._latest_lock,
+                self._hb_capture,
             ),
             daemon=False,
         )
@@ -144,6 +148,10 @@ class MpCameraPipeline:
                 self._meta_q,
                 self._decode_q,
                 self._stop,
+                self._hb_scanner,
+                self._latest_seq,
+                self._latest_lock,
+                self._events_q,
             ),
             daemon=False,
         )
@@ -196,6 +204,19 @@ class MpCameraPipeline:
     @property
     def is_ready(self) -> bool:
         return self._shm is not None and self._shm_w > 0 and self._shm_h > 0
+
+    def is_heartbeat_stale(self, now_wall: float, stale_s: float) -> bool:
+        """True nếu nhịp capture hoặc (khi bật decode) scanner quá cũ."""
+        if stale_s <= 0 or not self._running:
+            return False
+        cap = float(self._hb_capture.value)
+        if is_stale(cap, now_wall, stale_s):
+            return True
+        if self._decode_enabled and self._scanner_started:
+            scn = float(self._hb_scanner.value)
+            if is_stale(scn, now_wall, stale_s):
+                return True
+        return False
 
     @property
     def frame_wh(self) -> tuple[int, int]:

@@ -23,11 +23,19 @@ class OrderStateMachine:
     IDLE = "idle"
     RECORDING = "recording"
 
-    def __init__(self) -> None:
+    def __init__(self, transition_cooldown_s: float = 0.0) -> None:
         self._mode = self.IDLE
         self._order: Optional[str] = None
         self._switch_target: Optional[str] = None
         self._recording_start_mono: Optional[float] = None
+        self._transition_cooldown_s = transition_cooldown_s
+        self._last_transition_mono: Optional[float] = None
+
+    def _touch_transition(self, now_mono: Optional[float]) -> None:
+        if self._transition_cooldown_s <= 0:
+            return
+        if now_mono is not None:
+            self._last_transition_mono = now_mono
 
     def mark_recording_started(self, mono: float) -> None:
         """Gọi sau khi FFmpeg bắt đầu ghi thành công (dùng time.monotonic())."""
@@ -44,9 +52,17 @@ class OrderStateMachine:
         code = code.strip()
         if is_shutdown_countdown:
             return ScanResult(consume_for_shutdown_cancel=True)
+        if (
+            self._transition_cooldown_s > 0
+            and now_mono is not None
+            and self._last_transition_mono is not None
+            and (now_mono - self._last_transition_mono) < self._transition_cooldown_s
+        ):
+            return ScanResult()
         if self._mode == self.IDLE:
             self._order = code
             self._mode = self.RECORDING
+            self._touch_transition(now_mono)
             return ScanResult(
                 should_start_recording=True,
                 new_active_order=code,
@@ -61,16 +77,19 @@ class OrderStateMachine:
                 and (now_mono - self._recording_start_mono) < SAME_ORDER_GRACE_S
             ):
                 return ScanResult()
+            self._touch_transition(now_mono)
             return ScanResult(should_stop_recording=True, sound_immediate="stop_double")
         self._switch_target = code
+        self._touch_transition(now_mono)
         return ScanResult(should_stop_recording=True)
 
-    def notify_stop_confirmed(self) -> ScanResult:
+    def notify_stop_confirmed(self, *, now_mono: Optional[float] = None) -> ScanResult:
         self._recording_start_mono = None
         if self._switch_target:
             tgt = self._switch_target
             self._switch_target = None
             self._order = tgt
+            self._touch_transition(now_mono)
             return ScanResult(
                 should_start_recording=True,
                 new_active_order=tgt,

@@ -7,6 +7,8 @@ import multiprocessing.shared_memory as sm
 import numpy as np
 
 from packrecorder.ipc.frame_ring import (
+    SHM_NAME_PREFIX,
+    create_ring_shm,
     ndarray_slot,
     ring_nbytes,
     slot_nbytes,
@@ -18,6 +20,15 @@ def test_slot_layout_math():
     assert slot_nbytes(480, 640) == 640 * 480 * 3
     assert ring_nbytes(480, 640, 3) == 640 * 480 * 3 * 3
     assert slot_offset(1, 2, 4) == slot_nbytes(2, 4)
+
+
+def test_create_ring_shm_uses_packrecorder_prefix():
+    shm = create_ring_shm(4, 6, 2)
+    try:
+        assert shm.name.startswith(SHM_NAME_PREFIX)
+    finally:
+        shm.close()
+        shm.unlink()
 
 
 def test_roundtrip_write_read_slot():

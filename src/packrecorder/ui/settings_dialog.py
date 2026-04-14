@@ -237,6 +237,14 @@ class SettingsDialog(QDialog):
 
         tray_box = QGroupBox("Khay hệ thống / chạy nền")
         tf = QFormLayout(tray_box)
+        _tray_vidpid_note = QLabel(
+            "Chọn VID/PID ở màn hình quầy chỉ cấu hình máy quét HID POS (đọc raw qua hidapi). "
+            "Để ẩn cửa sổ và chỉ thấy icon khay, bật các tùy chọn bên dưới — hai việc không thay thế nhau. "
+            "HID POS raw: app vẫn nhận mã khi cửa sổ ẩn. Máy quét kiểu bàn phím: cần focus ô «Mã đơn»."
+        )
+        _tray_vidpid_note.setWordWrap(True)
+        _tray_vidpid_note.setStyleSheet("color:#555;font-size:smaller;")
+        tf.addRow(_tray_vidpid_note)
         tf.addRow(self._minimize_tray)
         tf.addRow(self._start_tray)
         tf.addRow(self._close_tray)
@@ -489,6 +497,11 @@ class SettingsDialog(QDialog):
                     scanner_serial_baud=prev.scanner_serial_baud if prev else 9600,
                     scanner_usb_vid=prev.scanner_usb_vid if prev else "",
                     scanner_usb_pid=prev.scanner_usb_pid if prev else "",
+                    scanner_input_kind=getattr(
+                        prev, "scanner_input_kind", "com"
+                    )
+                    if prev
+                    else "com",
                     preview_display_index=-1,
                     record_roi_norm=prev.record_roi_norm if prev else None,
                 )

@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from packrecorder.record_resolution import normalize_record_resolution_preset
+
+ScannerInputKind = Literal["com", "hid_pos"]
 from packrecorder.record_roi import clamp_norm_rect
 
 SoundMode = Literal["speaker", "scanner_host"]
@@ -35,6 +37,8 @@ class StationConfig:
     # Chuỗi HEX 4 ký tự (vd: "0C2E", "0B61"), rỗng = không ép.
     scanner_usb_vid: str = ""
     scanner_usb_pid: str = ""
+    # com = USB–serial (COM); hid_pos = HID POS qua hidapi (VID/PID), không dùng COM.
+    scanner_input_kind: ScannerInputKind = "com"
     # -1 = xem trước trùng camera ghi quầy này; >=0 = index camera xem trước.
     preview_display_index: int = -1
     # (x, y, w, h) chuẩn hoá 0..1 theo khung camera ghi; None = toàn khung.
@@ -111,6 +115,10 @@ class AppConfig:
     enable_global_barcode_hook: bool = False
     # COM-only: không dùng đường nhập kiểu wedge (Enter trong ô Mã đơn).
     scanner_com_only: bool = True
+    # 0 = tắt. Sau mỗi lần chuyển trạng thái ghi (on_scan), bỏ qua tín hiệu quét trùng trong cửa sổ này (giảm race COM/camera).
+    order_transition_cooldown_s: float = 0.0
+    # 0 = tắt. MP capture/scanner: nếu wall-clock heartbeat cũ hơn N giây → restart pipeline (xem MainWindow watchdog).
+    ipc_worker_stale_seconds: float = 0.0
     # Capture + pyzbar trong multiprocessing + SharedMemory (Windows spawn); luôn bật — không tùy chọn UI.
     use_multiprocessing_camera_pipeline: bool = True
     # HA / heartbeat / tìm kiếm (plan 2026-04-08)
@@ -185,7 +193,7 @@ def ensure_decode_camera_not_peer_record(cfg: AppConfig) -> None:
         changed = False
         for i in range(2):
             st = cfg.stations[i]
-            if station_uses_serial_scanner(st):
+            if station_uses_dedicated_barcode_scanner(st):
                 continue
             other = cfg.stations[1 - i]
             other_rec = station_record_cam_id(other, 1 - i)
@@ -237,6 +245,11 @@ def normalize_record_video_codec(value: str) -> RecordVideoCodec:
     return "auto"
 
 
+def _normalize_scanner_input_kind(value: object) -> ScannerInputKind:
+    s = str(value or "").strip().lower()
+    return "hid_pos" if s == "hid_pos" else "com"
+
+
 def _normalize_usb_hex_id(value: object) -> str:
     raw = str(value or "").strip().upper()
     if raw.startswith("0X"):
@@ -264,7 +277,7 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
                 record_rtsp_url=url,
                 record_camera_index=rid,
             )
-            if not station_uses_serial_scanner(s):
+            if not station_uses_dedicated_barcode_scanner(s):
                 s = replace(s, decode_camera_index=rid)
         else:
             s = replace(s, record_camera_kind="usb", record_rtsp_url="")
@@ -272,7 +285,7 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
                 s = replace(s, record_camera_index=0)
             elif s.record_camera_index > 9:
                 s = replace(s, record_camera_index=9)
-            if not station_uses_serial_scanner(s):
+            if not station_uses_dedicated_barcode_scanner(s):
                 s = replace(s, decode_camera_index=s.record_camera_index)
         if s.decode_camera_index < 0:
             s = replace(s, decode_camera_index=0)
@@ -296,8 +309,10 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
             s = replace(s, scanner_serial_baud=9600)
         vid = _normalize_usb_hex_id(s.scanner_usb_vid)
         pid = _normalize_usb_hex_id(s.scanner_usb_pid)
-        if vid != s.scanner_usb_vid or pid != s.scanner_usb_pid:
-            s = replace(s, scanner_usb_vid=vid, scanner_usb_pid=pid)
+        sk = _normalize_scanner_input_kind(getattr(s, "scanner_input_kind", "com"))
+        if sk == "hid_pos" and (not vid or not pid):
+            sk = "com"
+        s = replace(s, scanner_usb_vid=vid, scanner_usb_pid=pid, scanner_input_kind=sk)
         cfg.stations[i] = s
     ensure_distinct_station_record_cameras(cfg)
     ensure_decode_camera_not_peer_record(cfg)
@@ -340,6 +355,16 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
     cfg.scanner_com_only = bool(cfg.scanner_com_only)
     if cfg.scanner_com_only:
         cfg.enable_global_barcode_hook = False
+    oc = float(cfg.order_transition_cooldown_s)
+    if oc < 0:
+        cfg.order_transition_cooldown_s = 0.0
+    elif oc > 30.0:
+        cfg.order_transition_cooldown_s = 30.0
+    iw = float(cfg.ipc_worker_stale_seconds)
+    if iw < 0:
+        cfg.ipc_worker_stale_seconds = 0.0
+    elif iw > 120.0:
+        cfg.ipc_worker_stale_seconds = 120.0
     if cfg.tray_health_beep_interval_min < 0:
         cfg.tray_health_beep_interval_min = 0
     elif cfg.tray_health_beep_interval_min > 1440:
@@ -429,12 +454,26 @@ def station_uses_serial_scanner(st: StationConfig) -> bool:
     return bool(st.scanner_serial_port and st.scanner_serial_port.strip())
 
 
+def station_uses_hid_pos_scanner(st: StationConfig) -> bool:
+    """HID POS: cần VID+PID hợp lệ (sau normalize)."""
+    if getattr(st, "scanner_input_kind", "com") != "hid_pos":
+        return False
+    return bool(_normalize_usb_hex_id(st.scanner_usb_vid)) and bool(
+        _normalize_usb_hex_id(st.scanner_usb_pid)
+    )
+
+
+def station_uses_dedicated_barcode_scanner(st: StationConfig) -> bool:
+    """Máy quét phần cứng (COM hoặc HID POS), không đọc mã bằng pyzbar trên camera."""
+    return station_uses_serial_scanner(st) or station_uses_hid_pos_scanner(st)
+
+
 def _camera_is_serial_peer_record_feed(
     stations: list[StationConfig], camera_index: int
 ) -> bool:
-    """Camera này đang là camera ghi của ít nhất một quầy dùng máy quét COM."""
+    """Camera này đang là camera ghi của ít nhất một quầy dùng máy quét COM/HID (không pyzbar)."""
     return any(
-        station_uses_serial_scanner(s)
+        station_uses_dedicated_barcode_scanner(s)
         and station_record_cam_id(s, idx) == camera_index
         for idx, s in enumerate(stations[:2])
     )
@@ -444,7 +483,7 @@ def station_for_decode_camera(
     stations: list[StationConfig], camera_index: int
 ) -> StationConfig | None:
     for s in stations:
-        if station_uses_serial_scanner(s):
+        if station_uses_dedicated_barcode_scanner(s):
             continue
         if s.decode_camera_index != camera_index:
             continue
@@ -460,10 +499,10 @@ def camera_should_decode_on_index(stations: list[StationConfig], camera_index: i
 
 
 def stations_non_serial_decode_collision(stations: list[StationConfig]) -> bool:
-    """True nếu ≥2 quầy không dùng COM và cùng decode_camera_index (station_for_decode_camera chỉ khớp quầy đầu)."""
+    """True nếu ≥2 quầy không dùng máy quét COM/HID và cùng decode_camera_index (station_for_decode_camera chỉ khớp quầy đầu)."""
     dec: list[int] = []
     for s in stations[:2]:
-        if station_uses_serial_scanner(s):
+        if station_uses_dedicated_barcode_scanner(s):
             continue
         dec.append(int(s.decode_camera_index))
     return len(dec) >= 2 and dec[0] == dec[1]

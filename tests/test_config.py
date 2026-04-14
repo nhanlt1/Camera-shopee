@@ -12,6 +12,8 @@ from packrecorder.config import (
     save_config,
     station_for_decode_camera,
     station_record_cam_id,
+    station_uses_dedicated_barcode_scanner,
+    station_uses_hid_pos_scanner,
     stations_non_serial_decode_collision,
 )
 
@@ -383,3 +385,36 @@ def test_save_load_utf8_packer(tmp_path: Path):
     assert "Nguyễn" in raw
     assert "\\u" not in raw
     assert load_config(p).packer_label == "Nguyễn Văn A"
+
+
+def test_hid_pos_without_vid_pid_falls_back_to_com(tmp_path: Path) -> None:
+    st = StationConfig(
+        "a",
+        "Máy",
+        0,
+        0,
+        scanner_input_kind="hid_pos",
+        scanner_usb_vid="",
+        scanner_usb_pid="",
+    )
+    save_config(tmp_path / "c.json", AppConfig(multi_camera_mode="stations", stations=[st]))
+    c = load_config(tmp_path / "c.json")
+    assert c.stations[0].scanner_input_kind == "com"
+
+
+def test_station_uses_dedicated_barcode_scanner_com_and_hid() -> None:
+    com = StationConfig("a", "A", 0, 0, scanner_serial_port="COM3")
+    hid = StationConfig(
+        "b",
+        "B",
+        1,
+        1,
+        scanner_input_kind="hid_pos",
+        scanner_usb_vid="0C2E",
+        scanner_usb_pid="0B61",
+    )
+    cam_only = StationConfig("c", "C", 2, 2)
+    assert station_uses_dedicated_barcode_scanner(com)
+    assert station_uses_dedicated_barcode_scanner(hid)
+    assert station_uses_hid_pos_scanner(hid)
+    assert not station_uses_dedicated_barcode_scanner(cam_only)

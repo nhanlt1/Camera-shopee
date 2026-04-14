@@ -8,7 +8,11 @@ import shutil
 from pathlib import Path
 
 import pyzbar
-from PyInstaller.utils.hooks import collect_all, collect_delvewheel_libs_directory
+from PyInstaller.utils.hooks import (
+    collect_all,
+    collect_delvewheel_libs_directory,
+    collect_dynamic_libs,
+)
 
 block_cipher = None
 
@@ -22,6 +26,11 @@ datas, binaries = collect_delvewheel_libs_directory("numpy", datas=datas, binari
 
 for _dll in Path(pyzbar.__file__).resolve().parent.glob("*.dll"):
     binaries.append((str(_dll), "pyzbar"))
+
+try:
+    binaries += collect_dynamic_libs("hidapi")
+except Exception:
+    pass
 
 project_root = Path(SPECPATH)
 _ffmpeg_src = (os.environ.get("PACKRECORDER_FFMPEG") or "").strip() or shutil.which(
@@ -54,7 +63,14 @@ a = Analysis(
     pathex=["src"],
     binaries=binaries,
     datas=datas,
-    hiddenimports=hiddenimports,
+    hiddenimports=hiddenimports
+    + [
+        "hid",
+        "hidapi",
+        "packrecorder.hid_scanner_discovery",
+        "packrecorder.hid_pos_scan_worker",
+        "packrecorder.hid_report_parse",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[_rth],

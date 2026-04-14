@@ -12,6 +12,10 @@ from typing import Optional, Union
 
 import numpy as np
 
+from packrecorder.ipc.capture_backoff import (
+    CAPTURE_MAX_CONSECUTIVE_READ_FAILS,
+    read_fail_backoff_seconds,
+)
 from packrecorder.ipc.frame_ring import create_ring_shm, ndarray_slot
 from packrecorder.opencv_video import (
     configure_opencv_logging,
@@ -42,6 +46,7 @@ def mp_capture_worker_entry(
     latest_seq,
     latest_slot,
     latest_lock: Lock,
+    heartbeat_capture,
 ) -> None:
     """
     Top-level target cho Process(spawn).
@@ -132,14 +137,30 @@ def mp_capture_worker_entry(
             ("ready", camera_index, shm.name, cw, ch, fps, n_slots)
         )
         preview_discard_left = max(0, _PREVIEW_WARMUP_DISCARD_FRAMES)
+        read_fails = 0
         while not stop_event.is_set():
+            try:
+                heartbeat_capture.value = time.time()
+            except Exception:
+                pass
             if not cap.isOpened():
                 time.sleep(0.2)
                 continue
             ok, frame = cap.read()
             if not ok:
-                time.sleep(0.02)
+                read_fails += 1
+                if read_fails >= CAPTURE_MAX_CONSECUTIVE_READ_FAILS:
+                    events_queue.put(
+                        (
+                            "capture_failed",
+                            camera_index,
+                            "Camera không đọc được khung hình quá lâu (mất tín hiệu / USB).",
+                        )
+                    )
+                    return
+                time.sleep(read_fail_backoff_seconds(read_fails))
                 continue
+            read_fails = 0
             if getattr(frame, "ndim", 0) != 3 or int(frame.shape[2]) < 3:
                 continue
             fh, fw = int(frame.shape[0]), int(frame.shape[1])
@@ -183,9 +204,9 @@ def mp_capture_worker_entry(
 
             events_queue.put(
                 (
-                    "capture_failed",
+                    "worker_error",
                     camera_index,
-                    f"Lỗi capture: {traceback.format_exc()}",
+                    traceback.format_exc(),
                 )
             )
         except Exception:
