@@ -10,6 +10,7 @@ from typing import Optional
 from PySide6.QtCore import QThread, Signal
 
 from packrecorder.hid_report_parse import parse_hid_barcode_report
+from packrecorder.hid_scanner_discovery import HID_POS_USAGE_PAGE
 from packrecorder.serial_scan_worker import (
     QUEUE_DROP_LOG_MIN_INTERVAL_S,
     SERIAL_SCAN_QUEUE_MAX,
@@ -24,9 +25,60 @@ except ImportError:
     _hid = None  # type: ignore[misc, assignment]
 
 
+def _path_for_hid_open(path: object) -> bytes:
+    if path is None:
+        return b""
+    if isinstance(path, bytes):
+        return path
+    if isinstance(path, bytearray | memoryview):
+        return bytes(path)
+    return str(path).encode("utf-8", errors="surrogatepass")
+
+
 def _open_hid_device(vid: int, pid: int) -> object:
-    """Mở HID theo VID/PID — hỗ trợ gói hidapi (device+open) và pyhidapi cũ (Device)."""
+    """Mở HID theo VID/PID.
+
+    Trên Windows, thiết bị USB composite thường có nhiều interface; open(vid,pid) có thể
+    trả «open failed». Ưu tiên mở đúng path từ hid.enumerate(), đặc biệt usage page POS (0x8C).
+    """
     assert _hid is not None
+    candidates: list[dict] = []
+    try:
+        raw = list(_hid.enumerate())
+    except Exception:
+        raw = []
+    for d in raw:
+        try:
+            if int(d.get("vendor_id") or 0) != vid or int(d.get("product_id") or 0) != pid:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if isinstance(d, dict):
+            candidates.append(d)
+
+    def _sort_key(item: dict) -> tuple[int, int]:
+        up = int(item.get("usage_page") or 0)
+        iface = int(item.get("interface_number") or 0)
+        primary = 0 if up == HID_POS_USAGE_PAGE else 1
+        return (primary, iface)
+
+    candidates.sort(key=_sort_key)
+    for d in candidates:
+        path = d.get("path")
+        pb = _path_for_hid_open(path)
+        if not pb:
+            continue
+        dev = _hid.device()
+        try:
+            dev.open_path(pb)
+            return dev
+        except Exception:  # noqa: BLE001
+            try:
+                dev.close()
+            except Exception:
+                pass
+            continue
+
     maker = getattr(_hid, "Device", None)
     if callable(maker):
         return maker(vid, pid)

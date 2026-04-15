@@ -351,10 +351,9 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
     cfg.close_to_tray = bool(cfg.close_to_tray)
     cfg.low_process_priority = bool(cfg.low_process_priority)
     cfg.tray_show_toast_on_order = bool(cfg.tray_show_toast_on_order)
-    cfg.enable_global_barcode_hook = bool(cfg.enable_global_barcode_hook)
-    cfg.scanner_com_only = bool(cfg.scanner_com_only)
-    if cfg.scanner_com_only:
-        cfg.enable_global_barcode_hook = False
+    # Luôn chạy theo luồng quét chuyên dụng (COM/HID POS), không dùng keyboard-wedge/global hook.
+    cfg.scanner_com_only = True
+    cfg.enable_global_barcode_hook = False
     oc = float(cfg.order_transition_cooldown_s)
     if oc < 0:
         cfg.order_transition_cooldown_s = 0.0

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSizePolicy,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +43,7 @@ from packrecorder.serial_ports import (
 )
 from packrecorder.ui.hid_pos_setup_wizard import HidPosSetupWizard
 from packrecorder.ui.roi_preview_label import RoiPreviewLabel
+from packrecorder.ui.scanner_mode_dialog import ScannerModeDialog
 
 # Giống placeholder: khi chọn RTSP lần đầu (ô trống), điền sẵn để sửa ngay, không phải gõ lại từng ký tự.
 RTSP_DEFAULT_URL_TEXT_1 = (
@@ -101,29 +103,22 @@ class DualStationWidget(QWidget):
 
         self._root = QLineEdit()
         self._root.setPlaceholderText("Thư mục lưu video…")
+        self._root.setVisible(False)
         self._root.editingFinished.connect(self._emit_debounced)
-        btn_browse = QPushButton("Chọn thư mục…")
-        btn_browse.clicked.connect(self._pick_root)
 
-        btn_refresh = QPushButton("Làm mới camera & cổng COM")
+        btn_refresh = QPushButton("Làm mới thiết bị")
         btn_refresh.setToolTip(
-            "Quét lại webcam đang cắm và cổng USB serial (máy quét thường hiện là COMx)."
+            "Quét lại webcam và thiết bị máy quét đang cắm."
         )
+        btn_refresh.setMinimumHeight(32)
         self._btn_refresh = btn_refresh
         btn_refresh.clicked.connect(self._on_refresh_clicked)
-
-        row_paths = QHBoxLayout()
-        row_paths.setContentsMargins(0, 0, 0, 0)
-        row_paths.addWidget(QLabel("Lưu file vào:"))
-        row_paths.addWidget(self._root, 1)
-        row_paths.addWidget(btn_browse)
-        row_paths.addWidget(btn_refresh)
 
         self._top_bar = QWidget()
         top = QVBoxLayout(self._top_bar)
         top.setContentsMargins(0, 0, 0, 0)
-        top.setSpacing(6)
-        top.addLayout(row_paths)
+        top.setSpacing(0)
+        top.addWidget(self._root)
 
         self._preview: list[RoiPreviewLabel] = []
         self._record_banner: list[QLabel] = []
@@ -149,6 +144,7 @@ class DualStationWidget(QWidget):
         self._hid_block_widget: list[QWidget] = []
         self._hid_device_combo: list[QComboBox] = []
         self._hid_usage_label: list[QLabel] = []
+        self._scanner_selected_label: list[QLabel] = []
         self._tl_scan: list[QLabel] = []
 
         columns = QHBoxLayout()
@@ -281,6 +277,7 @@ class DualStationWidget(QWidget):
 
             sc = QComboBox()
             sc.setMinimumWidth(200)
+            sc.setMinimumHeight(34)
             sc.setToolTip(
                 "Chọn đúng máy quét: đọc cả dòng mô tả, không chỉ COMx. "
                 "Ưu tiên cổng USB serial (thường lên đầu danh sách)."
@@ -290,12 +287,13 @@ class DualStationWidget(QWidget):
 
             sk = QComboBox()
             sk.setMinimumWidth(200)
+            sk.setMinimumHeight(34)
             sk.addItem("USB–COM", "com")
             sk.addItem("HID POS (VID/PID)", "hid_pos")
             sk.setToolTip(
                 "USB–COM: máy quét dạng serial (cổng COM). "
                 "HID POS: đọc raw qua hidapi — chỉ cần VID/PID (pip: hidapi, kèm DLL Windows). "
-                "Không liên quan «chạy ngầm»: ẩn cửa sổ / icon khay bật trong Tệp → Cài đặt → Khay hệ thống."
+                "Ẩn cửa sổ / icon khay bật trong Tệp → Cài đặt → Khay hệ thống."
             )
             sk.currentIndexChanged.connect(
                 lambda _i, c=col: self._on_scanner_input_kind_changed(c)
@@ -325,26 +323,18 @@ class DualStationWidget(QWidget):
             self._tl_scan.append(tl_scan)
 
             row_controls = QHBoxLayout()
-            row_controls.setSpacing(10)
-
-            v_name = QVBoxLayout()
-            v_name.setSpacing(4)
-            v_name.setContentsMargins(0, 0, 0, 0)
-            v_name.addWidget(tl_name)
-            v_name.addWidget(ne)
-            w_name = QWidget()
-            w_name.setLayout(v_name)
-            row_controls.addWidget(w_name, 1)
-
+            row_controls.setSpacing(12)
             v_cam = QVBoxLayout()
             v_cam.setSpacing(4)
             v_cam.setContentsMargins(0, 0, 0, 0)
+            v_cam.addWidget(tl_name)
+            v_cam.addWidget(ne)
             v_cam.addWidget(tl_cam)
             v_cam.addWidget(kind_w)
             v_cam.addWidget(cw)
             w_cam = QWidget()
             w_cam.setLayout(v_cam)
-            row_controls.addWidget(w_cam, 2)
+            row_controls.addWidget(w_cam, 1)
 
             v_scan = QVBoxLayout()
             v_scan.setSpacing(4)
@@ -353,19 +343,25 @@ class DualStationWidget(QWidget):
             v_scan.addWidget(sk)
             v_scan.addWidget(tl_scan)
             v_scan.addWidget(sc)
+            selected_scanner = QLabel("Máy quét đã chọn: chưa có")
+            selected_scanner.setStyleSheet("color:#333;font-size:12px;")
+            selected_scanner.setWordWrap(True)
+            self._scanner_selected_label.append(selected_scanner)
+            v_scan.addWidget(selected_scanner)
             hid_row = QHBoxLayout()
             hid_row.setSpacing(8)
             hid_row.addWidget(hv, 1)
             hid_row.addWidget(hp, 1)
             hid_w = QWidget()
             hid_w.setLayout(hid_row)
-            v_scan.addWidget(hid_w)
+            hid_w.setVisible(False)
             self._hid_row_widget.append(hid_w)
 
             hid_tool_row = QHBoxLayout()
             hid_tool_row.setSpacing(8)
             hcb = QComboBox()
             hcb.setMinimumWidth(160)
+            hcb.setMinimumHeight(34)
             hcb.setToolTip(
                 "Danh sách thiết bị HID gần giống máy quét (tên / Usage Page 0x8C). "
                 "Chọn một mục để điền VID/PID — hoặc nhập tay bên dưới."
@@ -375,17 +371,32 @@ class DualStationWidget(QWidget):
             )
             btn_hid_refresh = QPushButton("Làm mới HID")
             btn_hid_refresh.setToolTip("Quét lại danh sách thiết bị HID (cần cài packrecorder[hid]).")
+            btn_hid_refresh.setMinimumHeight(34)
             btn_hid_refresh.clicked.connect(
                 lambda _checked=False, c=col: self._on_hid_refresh_clicked(c)
             )
-            btn_hid_wizard = QPushButton("Thiết lập máy quét…")
+            btn_hid_wizard = QPushButton("Tự phát hiện máy quét")
             btn_hid_wizard.setToolTip("Hướng dẫn từng bước: rút/cắm USB và chọn đúng máy quét.")
+            btn_hid_wizard.setMinimumHeight(34)
             btn_hid_wizard.clicked.connect(
                 lambda _checked=False, c=col: self._open_hid_wizard(c)
             )
             hid_tool_row.addWidget(hcb, 1)
             hid_tool_row.addWidget(btn_hid_refresh)
             hid_tool_row.addWidget(btn_hid_wizard)
+            btn_mode_settings = QPushButton("⚙ Cài đặt")
+            btn_mode_settings.setIcon(
+                self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView)
+            )
+            btn_mode_settings.setToolTip("Cài đặt máy quét")
+            btn_mode_settings.setMinimumHeight(34)
+            btn_mode_settings.setStyleSheet(
+                "font-weight:600;padding:4px 10px;"
+            )
+            btn_mode_settings.clicked.connect(
+                lambda _checked=False, c=col: self._open_scanner_mode_dialog(c)
+            )
+            hid_tool_row.addWidget(btn_mode_settings)
             hid_tool_w = QWidget()
             hid_tool_w.setLayout(hid_tool_row)
             h_usage = QLabel("")
@@ -415,15 +426,11 @@ class DualStationWidget(QWidget):
 
             self._name.append(ne)
 
-            dh = QLabel(
-                "Khi chọn cổng COM ở trên, mã vạch đọc từ máy quét USB–serial.\n"
-                "Để trống COM thì dùng camera đọc mã (pyzbar) bên dưới."
-            )
+            dh = QLabel("")
             dh.setWordWrap(True)
             dh.setStyleSheet("color:#666;font-size:11px;")
             self._decode_hint.append(dh)
             form_l.addLayout(row_controls)
-            form_l.addWidget(dh)
 
             v.addWidget(form_w, 0)
             columns.addWidget(box, 1)
@@ -574,6 +581,10 @@ class DualStationWidget(QWidget):
             self._root.setText(d)
             self.fields_changed.emit()
 
+    def sync_video_root(self, root_path: str) -> None:
+        with QSignalBlocker(self._root):
+            self._root.setText(root_path or "")
+
     def _repopulate_camera_combo(self, combo: QComboBox, indices: list[int], select: int) -> None:
         with QSignalBlocker(combo):
             combo.clear()
@@ -714,14 +725,16 @@ class DualStationWidget(QWidget):
         kind = self._scanner_kind_data(col)
         is_com = kind == "com"
         self._scanner[col].setVisible(is_com)
-        self._hid_row_widget[col].setVisible(not is_com)
+        self._hid_row_widget[col].setVisible(False)
         if 0 <= col < len(self._hid_block_widget):
-            self._hid_block_widget[col].setVisible(not is_com)
+            self._hid_block_widget[col].setVisible(True)
         if not is_com:
             self._repopulate_hid_device_combo(col)
+        if 0 <= col < len(self._scanner_match_hint) and not is_com:
+            self._scanner_match_hint[col].setVisible(False)
         if 0 <= col < len(self._tl_scan):
             self._tl_scan[col].setText(
-                "Máy quét (USB–COM)" if is_com else "HID POS — VID & PID (HEX)"
+                "Máy quét (USB–COM)" if is_com else "Máy quét HID POS"
             )
         if 0 <= col < len(self._decode_hint):
             dh = self._decode_hint[col]
@@ -734,12 +747,12 @@ class DualStationWidget(QWidget):
                 dh.setText(
                     "HID POS — raw: app đọc mã qua hidapi (VID/PID); khi cửa sổ ẩn vẫn nhận nếu máy ở chế độ POS/raw. "
                     "Ẩn cửa sổ / chỉ icon khay: Cài đặt → «Thu vào khay hệ thống» (không phải do chọn VID/PID). "
-                    "Máy ở chế độ bàn phím: quét vào ô «Mã đơn» rồi Enter hoặc «Bắt đầu ghi». "
                     "Thiếu hidapi: pip install -e ."
                 )
         if emit:
             self._emit_debounced()
         self._apply_manual_order_readonly()
+        self._refresh_scanner_selected_label(col)
 
     def _on_hid_vid_pid_changed(self, col: int) -> None:
         if self._scanner_kind_data(col) != "hid_pos":
@@ -808,6 +821,11 @@ class DualStationWidget(QWidget):
                 return
             idx = combo.findData(self._hid_combo_key(v, p))
             combo.setCurrentIndex(idx if idx >= 0 else 0)
+            if idx >= 0:
+                usage_lbl.setText(
+                    f"Đã nhận diện máy quét HID POS: {vtxt}:{ptxt}."
+                )
+                usage_lbl.setVisible(True)
         else:
             combo.setCurrentIndex(0)
 
@@ -833,6 +851,7 @@ class DualStationWidget(QWidget):
             self._hid_pid[col].setText(f"{p:04X}")
         self._on_hid_vid_pid_changed(col)
         self._emit_debounced()
+        self._refresh_scanner_selected_label(col)
 
     def _on_hid_refresh_clicked(self, col: int) -> None:
         if self._scanner_kind_data(col) != "hid_pos":
@@ -846,6 +865,13 @@ class DualStationWidget(QWidget):
     def _open_hid_wizard(self, col: int) -> None:
         if self._scanner_kind_data(col) != "hid_pos":
             return
+        QMessageBox.information(
+            self,
+            "Tự phát hiện máy quét",
+            "Bước 1: Bấm icon răng cưa để mở cài đặt máy quét và quét mã chuyển chế độ Chạy ngầm.\n"
+            "Bước 2: Bấm «Tự phát hiện máy quét» để dò thiết bị.\n"
+            "Bước 3: Nếu cần, rút/cắm lại máy quét và hoàn tất wizard.",
+        )
         w = HidPosSetupWizard(self)
 
         def _apply(v: int, p: int) -> None:
@@ -859,6 +885,12 @@ class DualStationWidget(QWidget):
 
         w.vid_pid_chosen.connect(_apply)
         w.exec()
+        self._refresh_scanner_selected_label(col)
+
+    def _open_scanner_mode_dialog(self, col: int) -> None:
+        del col
+        dlg = ScannerModeDialog(self)
+        dlg.exec()
 
     def _col_dedicated_scanner_active(self, col: int) -> bool:
         if not (0 <= col < len(self._scanner_input_kind)):
@@ -871,7 +903,7 @@ class DualStationWidget(QWidget):
         return bool(port and str(port).strip())
 
     def _manual_order_readonly_for_col(self, col: int) -> bool:
-        """Chỉ khóa ô Mã đơn khi dùng COM có cổng (serial worker tự điền). HID POS / COM trống: mở để wedge hoặc camera."""
+        """Chỉ khóa ô Mã đơn khi dùng COM có cổng (serial worker tự điền)."""
         if not (0 <= col < len(self._scanner_input_kind)):
             return False
         if self._scanner_kind_data(col) == "hid_pos":
@@ -898,9 +930,28 @@ class DualStationWidget(QWidget):
                         self._scanner[oc].setCurrentIndex(0)
                     self._on_scanner_or_decode_changed(oc, emit=False)
         self._apply_manual_order_readonly()
+        self._refresh_scanner_selected_label(col)
+
+    def _refresh_scanner_selected_label(self, col: int) -> None:
+        if not (0 <= col < len(self._scanner_selected_label)):
+            return
+        lbl = self._scanner_selected_label[col]
+        if 0 <= col < len(self._scanner_match_hint) and self._scanner_kind_data(col) == "hid_pos":
+            self._scanner_match_hint[col].setVisible(False)
+        if self._scanner_kind_data(col) == "com":
+            txt = self._scanner[col].currentText().strip()
+            lbl.setText(f"Máy quét đã chọn: {txt or 'chưa có'}")
+            return
+        txt = self._hid_device_combo[col].currentText().strip()
+        if not txt or txt.startswith("(Chọn"):
+            v = self._hid_vid[col].text().strip().upper()
+            p = self._hid_pid[col].text().strip().upper()
+            if len(v) == 4 and len(p) == 4:
+                txt = f"HID POS {v}:{p}"
+        lbl.setText(f"Máy quét đã chọn: {txt or 'chưa có'}")
 
     def _apply_manual_order_readonly(self) -> None:
-        """Ô «Mã đơn» chỉ khóa khi COM có cổng. HID POS: mở — máy kiểu bàn phím gõ vào đây rồi Enter / Bắt đầu ghi."""
+        """Ô «Mã đơn» chỉ khóa khi COM có cổng."""
         try:
             for col in range(2):
                 self._manual_col_order[col].setReadOnly(
@@ -1025,6 +1076,7 @@ class DualStationWidget(QWidget):
             with QSignalBlocker(self._name[col]):
                 self._name[col].setText(s.packer_label)
             self._on_scanner_or_decode_changed(col, emit=False)
+            self._refresh_scanner_selected_label(col)
             with QSignalBlocker(self._preview[col]):
                 self._preview[col].set_roi_norm(s.record_roi_norm)
             self._rtsp_armed[col] = bool(is_rtsp)
@@ -1159,7 +1211,7 @@ class DualStationWidget(QWidget):
             self._preview[col].set_roi_locked(locked)
 
     def focus_default_order_input(self) -> None:
-        """Đưa tiêu điểm bàn phím vào ô mã đơn quầy 1 (máy quét kiểu wedge)."""
+        """Đưa tiêu điểm vào ô mã đơn quầy 1."""
         if self._manual_col_order:
             self._manual_col_order[0].setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 

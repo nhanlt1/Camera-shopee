@@ -27,3 +27,16 @@ def test_odd_length_no_dup_fold() -> None:
 def test_empty() -> None:
     assert normalize_manual_order_text("") == ""
     assert normalize_manual_order_text("   \n  ") == ""
+
+
+def test_strip_hid_aim_qr_prefix() -> None:
+    """Winson HID POS: tiền tố điều khiển + ]Q1 (AIM QR) trước payload thật."""
+    assert (
+        normalize_manual_order_text("\x14]Q1BESTMP0052261466VNA")
+        == "BESTMP0052261466VNA"
+    )
+    assert normalize_manual_order_text("]Q1ORDER-123") == "ORDER-123"
+
+
+def test_strip_datamatrix_aim_prefix() -> None:
+    assert normalize_manual_order_text("]d2ABC123") == "ABC123"

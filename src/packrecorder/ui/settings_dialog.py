@@ -109,7 +109,7 @@ class SettingsDialog(QDialog):
         self._shutdown_on.setChecked(cfg.shutdown_enabled)
         self._shutdown_on.setToolTip(
             "Đến giờ hẹn, hộp đếm ngược chỉ hiện nếu 20 phút liền không có thao tác "
-            "(chuột, bàn phím, quét mã, nhập mã…)."
+            "(chuột, quét mã, nhập mã…)."
         )
         self._shutdown_time = QLineEdit(cfg.shutdown_time_hhmm)
 
@@ -119,14 +119,9 @@ class SettingsDialog(QDialog):
         self._sound_mode.addItems(["speaker", "scanner_host"])
         self._sound_mode.setCurrentIndex(0 if cfg.sound_mode == "speaker" else 1)
 
-        self._always_top = QCheckBox(
-            "Luôn hiển thị cửa sổ trên cùng (ghim — hỗ trợ máy quét kiểu bàn phím)"
-        )
+        self._always_top = QCheckBox("Luôn hiển thị cửa sổ trên cùng (ghim)")
         self._always_top.setChecked(cfg.window_always_on_top)
-        self._always_top.setToolTip(
-            "Giữ cửa sổ nổi trên các app khác. Máy quét USB–COM không cần. "
-            "Máy quét giả lập bàn phím: luôn dùng chế độ Đa quầy và để tiêu điểm ở ô «Mã đơn»."
-        )
+        self._always_top.setToolTip("Giữ cửa sổ nổi trên các app khác.")
         self._retention = QSpinBox()
         self._retention.setRange(0, 3650)
         self._retention.setValue(int(cfg.video_retention_keep_days))
@@ -230,17 +225,12 @@ class SettingsDialog(QDialog):
         self._health_vol.setSingleStep(0.05)
         self._health_vol.setDecimals(2)
         self._health_vol.setValue(float(cfg.tray_health_beep_volume))
-        self._global_hook = QCheckBox(
-            "Thử lắng nghe mã toàn cục (chưa hỗ trợ — ưu tiên máy quét COM khi chạy nền)"
-        )
-        self._global_hook.setChecked(cfg.enable_global_barcode_hook)
-
         tray_box = QGroupBox("Khay hệ thống / chạy nền")
         tf = QFormLayout(tray_box)
         _tray_vidpid_note = QLabel(
             "Chọn VID/PID ở màn hình quầy chỉ cấu hình máy quét HID POS (đọc raw qua hidapi). "
             "Để ẩn cửa sổ và chỉ thấy icon khay, bật các tùy chọn bên dưới — hai việc không thay thế nhau. "
-            "HID POS raw: app vẫn nhận mã khi cửa sổ ẩn. Máy quét kiểu bàn phím: cần focus ô «Mã đơn»."
+            "HID POS raw: app vẫn nhận mã khi cửa sổ ẩn."
         )
         _tray_vidpid_note.setWordWrap(True)
         _tray_vidpid_note.setStyleSheet("color:#555;font-size:smaller;")
@@ -252,7 +242,6 @@ class SettingsDialog(QDialog):
         tf.addRow(self._tray_toast)
         tf.addRow("Bíp «còn sống» mỗi (phút), 0 = tắt", self._health_interval)
         tf.addRow("Âm lượng bíp (0–1)", self._health_vol)
-        tf.addRow(self._global_hook)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Cancel
@@ -328,10 +317,6 @@ class SettingsDialog(QDialog):
                     "Mã quét từ camera chỉ được gán một quầy — hãy sửa trước khi lưu.",
                 )
                 return
-        if self._global_hook.isChecked() and not self._cfg.enable_global_barcode_hook:
-            from packrecorder.global_input_optional import try_enable_global_barcode_hook
-
-            try_enable_global_barcode_hook(self)
         super().accept()
 
     def _on_mode_changed(self) -> None:
@@ -554,7 +539,7 @@ class SettingsDialog(QDialog):
             tray_show_toast_on_order=self._tray_toast.isChecked(),
             tray_health_beep_interval_min=int(self._health_interval.value()),
             tray_health_beep_volume=float(self._health_vol.value()),
-            enable_global_barcode_hook=self._global_hook.isChecked(),
+            enable_global_barcode_hook=False,
         )
         if self._mode_pip.isChecked():
             base = replace(

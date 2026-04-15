@@ -65,9 +65,10 @@ class HidPosSetupWizard(QWizard):
         lay = QVBoxLayout(p)
         lay.addWidget(
             QLabel(
-                "Nếu máy quét đang ở chế độ «bàn phím» (gõ vào Notepad), hãy quét mã cấu hình "
-                "từ sách hướng dẫn để chuyển sang chế độ HID POS / USB-HID (tên tùy hãng).\n\n"
-                "Sau đó bấm «Tiếp» để app liệt kê thiết bị và chọn đúng máy quét."
+                "Bước chuẩn bị:\n"
+                "1) Mở «Cài đặt máy quét» (icon răng cưa) và quét mã chuyển chế độ Chạy ngầm.\n"
+                "2) Quay lại wizard này, bấm «Tiếp» để app liệt kê thiết bị.\n"
+                "3) Chọn đúng máy quét hoặc dùng rút/cắm để tự nhận diện."
             )
         )
         lay.addStretch(1)

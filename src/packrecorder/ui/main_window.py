@@ -28,14 +28,19 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPushButton,
     QStackedWidget,
     QStatusBar,
     QSystemTrayIcon,
-    QToolBar,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
 )
 
 from packrecorder.duplicate import is_duplicate_order
@@ -74,7 +79,6 @@ from packrecorder.record_resolution import (
 )
 from packrecorder.pip_composite import composite_pip_bgr
 from packrecorder.retention import purge_old_day_folders
-from packrecorder.telegram_notify import send_duplicate_order_notice
 from packrecorder.session_log import (
     append_session_log,
     log_session_error,
@@ -275,37 +279,72 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._dual_panel)
         self._stack.addWidget(self._mode_hint)
         self._update_central_page()
-        self.setCentralWidget(self._stack)
+
+        self._header_title = QLabel("Pack Recorder")
+        self._header_title.setStyleSheet("font-size:14px;font-weight:600;")
+
+        self._header_video_root = QLineEdit(self._config.video_root)
+        self._header_video_root.setPlaceholderText("Thư mục lưu video…")
+        self._header_video_root.editingFinished.connect(
+            self._on_header_video_root_changed
+        )
+        self._btn_header_browse_root = QPushButton("Chọn…")
+        self._btn_header_browse_root.clicked.connect(self._browse_header_video_root)
+
+        self._header_refresh_btn = QPushButton("Làm mới thiết bị")
+        self._header_refresh_btn.setToolTip(
+            "Quét lại camera và thiết bị máy quét đang cắm."
+        )
+        self._header_refresh_btn.clicked.connect(self._on_dual_refresh_devices)
+
+        header = QWidget()
+        hrow = QHBoxLayout(header)
+        hrow.setContentsMargins(6, 6, 6, 6)
+        hrow.setSpacing(8)
+
+        hrow.addWidget(self._header_title)
         self.setMinimumSize(920, 560)
         self.resize(1040, 640)
 
-        res_bar = QToolBar("Độ phân giải ghi", self)
-        res_bar.setMovable(False)
-        res_bar.addWidget(QLabel("Độ phân giải ghi: "))
         self._record_resolution_combo = QComboBox()
-        self._record_resolution_combo.setMinimumWidth(300)
+        self._record_resolution_combo.setMinimumWidth(220)
         for p in PRESET_ORDER:
             self._record_resolution_combo.addItem(PRESET_LABELS_VI[p], p)
         self._sync_record_resolution_combo_from_config()
         self._record_resolution_combo.currentIndexChanged.connect(
             self._on_record_resolution_combo_changed
         )
-        res_bar.addWidget(self._record_resolution_combo)
-        self.addToolBar(res_bar)
 
-        pin_bar = QToolBar("Cửa sổ", self)
-        pin_bar.setMovable(False)
         self._act_always_top = QAction(_pin_icon(), "Luôn trên cùng", self)
         self._act_always_top.setCheckable(True)
         self._act_always_top.setChecked(self._config.window_always_on_top)
         self._act_always_top.setToolTip(
             "Ghim cửa sổ luôn nổi trên app khác.\n"
             "• Máy quét COM: không cần ghim vẫn nhận mã.\n"
-            "• Chế độ COM-only: không dùng luồng quét kiểu bàn phím (wedge)."
+            "• Chế độ chạy nền dùng luồng quét chuyên dụng, không phụ thuộc focus."
         )
         self._act_always_top.toggled.connect(self._on_always_on_top_toggled)
-        pin_bar.addAction(self._act_always_top)
-        self.addToolBar(pin_bar)
+        self._pin_btn = QToolButton()
+        self._pin_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._pin_btn.setDefaultAction(self._act_always_top)
+        self._pin_btn.setText("Ghim")
+
+        hrow.addWidget(self._pin_btn)
+        hrow.addSpacing(8)
+        hrow.addWidget(QLabel("Lưu file:"))
+        hrow.addWidget(self._header_video_root, 1)
+        hrow.addWidget(self._btn_header_browse_root)
+        hrow.addWidget(self._header_refresh_btn)
+        hrow.addWidget(QLabel("Độ phân giải:"))
+        hrow.addWidget(self._record_resolution_combo)
+
+        root = QWidget()
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+        root_layout.addWidget(header, 0)
+        root_layout.addWidget(self._stack, 1)
+        self.setCentralWidget(root)
 
         self._rebuild_order_machines()
         self._update_packer_message()
@@ -571,6 +610,41 @@ class MainWindow(QMainWindow):
         self._act_always_top.setChecked(on)
         self._act_always_top.blockSignals(False)
         self._apply_always_on_top(on)
+
+    def _on_header_video_root_changed(self) -> None:
+        self._note_user_activity()
+        new_root = self._header_video_root.text().strip()
+        if new_root == (self._config.video_root or "").strip():
+            return
+        self._config = replace(self._config, video_root=new_root)
+        self._config = normalize_config(self._config)
+        save_config(self._config_path, self._config)
+        self._dual_panel.sync_video_root(new_root)
+        self._close_recording_index()
+        self._try_open_recording_index()
+        self._restart_office_heartbeat_timer()
+        self._restart_sync_worker()
+
+    def _browse_header_video_root(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        d = QFileDialog.getExistingDirectory(
+            self,
+            "Thư mục lưu video",
+            self._header_video_root.text().strip() or self._config.video_root,
+        )
+        if not d:
+            return
+        self._header_video_root.setText(d)
+        self._on_header_video_root_changed()
+
+    def _sync_header_video_root_from_config(self) -> None:
+        txt = self._config.video_root or ""
+        if self._header_video_root.text() == txt:
+            return
+        self._header_video_root.blockSignals(True)
+        self._header_video_root.setText(txt)
+        self._header_video_root.blockSignals(False)
 
     def _focus_for_scanner_wedge(self) -> None:
         if self._config.scanner_com_only:
@@ -1948,14 +2022,9 @@ class MainWindow(QMainWindow):
         if is_duplicate_order(write_root, order, t0.date()):
             short = order if len(order) <= 48 else order[:45] + "…"
             self._status.showMessage(
-                f"Trùng đơn: đã có video cho mã {short} trong ngày {t0.date().isoformat()} — không ghi thêm.",
-                8000,
+                f"Đã có video cùng mã {short} trong ngày {t0.date().isoformat()} — ghi thêm file mới (tên có giờ phút).",
+                6000,
             )
-            self._feedback.play_duplicate_order_alert()
-            send_duplicate_order_notice(order, st.packer_label)
-            self._order_sm[station_id] = self._new_order_state_machine()
-            self._clear_station_order_pending(station_id)
-            return
         try:
             ff = _resolve_ffmpeg(self._config)
         except FileNotFoundError:
@@ -2084,13 +2153,9 @@ class MainWindow(QMainWindow):
         if is_duplicate_order(write_root, order, t0.date()):
             short = order if len(order) <= 48 else order[:45] + "…"
             self._status.showMessage(
-                f"Trùng đơn: đã có video cho mã {short} trong ngày {t0.date().isoformat()} — không ghi thêm.",
-                8000,
+                f"Đã có video cùng mã {short} trong ngày {t0.date().isoformat()} — ghi thêm file mới (tên có giờ phút).",
+                6000,
             )
-            self._feedback.play_duplicate_order_alert()
-            send_duplicate_order_notice(order, self._config.packer_label)
-            self._order_sm["pip"] = self._new_order_state_machine()
-            return
         try:
             ff = _resolve_ffmpeg(self._config)
         except FileNotFoundError:
@@ -2345,6 +2410,7 @@ class MainWindow(QMainWindow):
                 self._update_central_page()
                 self._sync_record_resolution_combo_from_config()
                 self._sync_always_on_top_from_config()
+                self._sync_header_video_root_from_config()
                 self._setup_system_tray()
                 self._restart_tray_health_timer()
                 qa = QApplication.instance()
