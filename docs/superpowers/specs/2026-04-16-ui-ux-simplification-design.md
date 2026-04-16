@@ -141,6 +141,13 @@ Bổ sung vào `AppConfig` (tên field có thể tinh chỉnh khi implement):
 - Đổi tab sang **Quản lý** **không** dừng worker COM / camera / pipeline ghi: `OrderStateMachine`, `SerialScanWorker`, `MpCameraPipeline`, v.v. **tiếp tục** như khi cửa sổ ở tab Quầy — tab chỉ đổi **lớp UI** hiển thị (embed dialog / widget tìm kiếm trong tab, không modal che toàn màn hình bắt buộc).
 - Tránh gắn focus bắt buộc vào ô tìm kiếm khi vừa chuyển tab (để máy quét COM không bị «nuốt» ký tự vào ô filter nếu không cần); tuỳ chọn: chỉ focus ô tìm khi người dùng click.
 
+**Sự kiện chuyển tab (Tab Switching Logic) — lưu ý triển khai:**
+
+- Khi tab **Quầy** không còn hiển thị (widget bị ẩn trong `QTabWidget`, `visible = false`, hoặc tương đương **unmapped** khỏi màn hình), đó chỉ là **thay đổi hiển thị**, **không** được coi là tín hiệu dừng nghiệp vụ.
+- **Cấm** gắn `pause()`, `stop()`, hoặc teardown worker / pipeline vào các hook kiểu «mất focus», `hideEvent` / `VisibilityChange` của widget Quầy **chỉ vì** người dùng đã chuyển sang tab Quản lý — sẽ làm **đứt** quét COM, decode, hoặc ghi video đang chạy.
+- Preview camera có thể **tạm không vẽ** lên màn hình khi tab ẩn (tiết kiệm CPU tuỳ chính sách), nhưng **capture / scanner / state machine / ghi file** phải **giữ nguyên** trừ khi có lệnh nghiệp vụ rõ ràng (dừng app, tắt máy, v.v.).
+- Nếu tối ưu: tách rõ **«dừng vẽ preview»** khỏi **«dừng worker»** trong code review checklist.
+
 ### 6.2. Màn hình Quầy (hằng ngày)
 
 - **Điều hướng:** tab **Quầy** / **Quản lý** (6.2a) tách khỏi header toolbar; mặc định mở tab Quầy.
@@ -372,6 +379,7 @@ Xem thêm bảng và hướng dẫn in: [`docs/scanner-config-codes/winson-mode-
 
 - **Giả định:** một máy trạm điển hình dùng 1–2 quầy; không mô tả chi tiết chế độ PIP/single trong màn Quầy (có thể vẫn dùng UI hiện tại cho các chế độ đó).
 - **Quyết định UX (kho vận):** trạng thái khi thu nhỏ/ẩn cửa sổ chính ưu tiên **cửa sổ nổi Mini** (6.2b), không phụ thuộc tooltip/icon khay; khay vẫn có thể tồn tại cho lệnh phụ.
+- **Triển khai tab (6.2a):** không `pause`/`stop` worker khi chuyển tab hoặc khi widget Quầy unmapped — xem **Tab Switching Logic** trong **6.2a**.
 - **Rủi ro:** full screen + Esc cần thiết kế cẩn thận để không kẹt người dùng; nên giữ taskbar hoặc cách thoát fullscreen rõ ràng (ví dụ Esc có xác nhận).
 - **Bước tiếp theo sau khi duyệt spec:** lập kế hoạch triển khai theo skill `writing-plans` (chia task: config flags, **tab Quầy / Quản lý** (6.2a: embed tìm kiếm, không toolbar), widget Quầy, wizard Setup + nhánh lỗi máy quét (QR `881001133.`), màn Settings máy quét (ba QR), **`MiniStatusOverlay`** (6.2b), khay dự phòng, startup shortcut, QA).
 
