@@ -4,6 +4,8 @@
 **Trạng thái:** bản thiết kế — chờ duyệt trước khi lập kế hoạch triển khai  
 **Phạm vi:** ứng dụng **Pack Recorder** (Windows, PySide6), tập trung chế độ **đa quầy** (`multi_camera_mode = stations`) vì đúng luồng «mỗi camera + máy quét + tên máy».
 
+**Điều hướng nhanh:** mô tả **giao diện sau khi làm xong** và **chỗ bấm để mở Wizard** nằm ở **mục 11** và **mục 12** (cuối tài liệu).
+
 ---
 
 ## 1. Mục tiêu
@@ -181,11 +183,12 @@ Tài liệu và file QR mẫu: mục **7.6** và thư mục `docs/scanner-config
 
 **Phạm vi:** màn **Cài đặt** / tab hoặc nhóm **«Máy quét / cổng COM»** — dành cho người đã vận hành, muốn **đổi chế độ** Winson mà không vào Wizard lần đầu.
 
-- Hiển thị **ba ô QR (hoặc ba mã vạch in được)** tương ứng ba chế độ, kèm nhãn ngắn:
+- Hiển thị **ba tuỳ chọn** chế độ (**USB COM**, **USB HID**, **USB Keyboard**) dưới dạng radio button, dropdown hoặc nút chọn kèm nhãn ngắn.
+- **Chỉ khi** người dùng **chọn một chế độ cụ thể**, mới hiển thị **QR code hoặc barcode** tương ứng với mã cấu hình:
   - **USB COM** — `881001133.`
   - **USB HID** — `881001131.`
   - **USB Keyboard** — `881001124.`
-- Người dùng **quét đúng mã** trên màn hình (hoặc in tem dán) để chuyển máy quét sang chế độ mong muốn; sau đó **Làm mới thiết bị** và chọn cổng trong Pack Recorder.
+- Người dùng **quét đúng mã** đang hiển thị trên màn hình (hoặc có thể in tem dán nếu muốn) để chuyển máy quét sang chế độ đã chọn; sau đó **Làm mới thiết bị** và chọn cổng trong Pack Recorder.
 - **Khác Wizard:** ở đây luôn có đủ **ba** lựa chọn; Wizard lần đầu chỉ **nhấn mạnh USB COM** khi phát hiện lỗi/không nhận thiết bị.
 
 ### 6.4. Khởi động cùng Windows
@@ -335,6 +338,73 @@ Xem thêm bảng và hướng dẫn in: [`docs/scanner-config-codes/winson-mode-
 - **Giả định:** một máy trạm điển hình dùng 1–2 quầy; không mô tả chi tiết chế độ PIP/single trong màn Quầy (có thể vẫn dùng UI hiện tại cho các chế độ đó).
 - **Rủi ro:** full screen + Esc cần thiết kế cẩn thận để không khóa người dùng; nên giữ taskbar hoặc phím tắt thoát rõ ràng.
 - **Bước tiếp theo sau khi duyệt spec:** lập kế hoạch triển khai theo skill `writing-plans` (chia task: config flags, widget Quầy, wizard Setup + nhánh lỗi máy quét (QR `881001133.`), màn Settings máy quét (ba QR), **tooltip/menu khay + taskbar title: hai dòng Máy 1/Máy 2** (6.2b), startup shortcut, QA).
+
+---
+
+## 11. Giao diện mục tiêu sau chỉnh sửa (mô tả cho người dùng cuối)
+
+Phần này **tổng hợp** trạng thái UI sau khi triển khai các mục 5–7 (không trùng lặp từng bullet kỹ thuật). **Chưa có trong bản build hiện tại** cho đến khi code theo spec.
+
+### 11.1. Hai chế độ màn hình chính
+
+| Chế độ | Người dùng thấy gì |
+|--------|---------------------|
+| **Quầy (hằng ngày)** | Màn hình **tối giản:** preview camera mỗi quầy (lớn nếu bật full screen / cinema), **chip hoặc nhãn trạng thái** rõ «Chờ quét» / «Đang ghi: …» cho **Máy 1** và **Máy 2**, tên quầy. **Không** còn khối combo USB/RTSP/COM/HID/ROI trên mặt Quầy — chỉ khi mở **Thiết lập** (Wizard hoặc Cài đặt nâng cao). Một nút kiểu **«Thiết lập máy & quầy»** (Wizard) tách biệt với **Tệp → Cài đặt** (Settings đầy đủ) — chi tiết **mục 12**. |
+| **Thiết lập (Wizard)** | Trình tự **từng bước** (màn hình từng trang hoặc sidebar): camera → máy quét → tên quầy → hoàn tất; có nhánh **QR `881001133.`** khi không nhận COM (**6.3**). |
+
+### 11.2. Thanh menu và header (mục tiêu)
+
+- **Menu Tệp:** giữ **Cài đặt** (hộp thoại đầy đủ cho admin); thêm mục **«Trình hướng dẫn thiết lập quầy…»** (mở Wizard) — chi tiết **mục 12.1**.
+- **Thanh trên cùng ở chế độ Quầy:** có thể chỉ còn: **Ghim** (tuỳ chọn), **Đường dẫn lưu video** (hoặc rút gọn), **Độ phân giải ghi** (hoặc ẩn sau «Nâng cao»), nút **«Thiết lập máy & quầy»** (Wizard). **Làm mới thiết bị** có thể nằm trong Cài đặt hoặc Wizard để giảm nhiễu trên Quầy.
+
+### 11.3. Cài đặt nâng cao (`SettingsDialog`)
+
+- Vẫn là nơi **ffmpeg**, **khay**, **retention**, **backup**, **Telegram**, v.v.
+- Thêm (hoặc gom) nhóm **«Máy quét / mã Winson»** với **ba QR** đổi chế độ (**6.3a**) — **không** thay thế Wizard; dành cho người đã biết, cần đổi USB COM / HID / Keyboard nhanh.
+
+### 11.4. Khay hệ thống và taskbar
+
+- Icon khay: **tooltip hoặc menu** luôn có **hai dòng** Máy 1 / Máy 2 + trạng thái đơn (**6.2b**).
+- Thu nhỏ taskbar: tiêu đề cửa sổ hoặc tooltip phản ánh tóm tắt hai quầy (nếu một dòng thì rút gọn có cấu trúc).
+
+### 11.5. So với giao diện hiện tại (mục 2)
+
+- **Trước:** hai cột `DualStationWidget` luôn hiện form cấu hình thiết bị dài cùng preview.
+- **Sau:** trên **Quầy**, ưu tiên **hình + trạng thái**; form chi tiết chuyển sang **Wizard** hoặc **Cài đặt**.
+
+---
+
+## 12. Wizard thiết lập — các bước và người dùng mở bằng cách nào
+
+Wizard là **một hộp thoại / stack các bước** (QWizard hoặc tương đương), nội dung logic theo **6.3**. Dưới đây là **điểm vào** cố định trong thiết kế (implement phải có ít nhất các lối (1)–(3); (4)–(5) tuỳ chọn).
+
+### 12.1. Bảng: click / thao tác nào mở Wizard?
+
+| # | Kích hoạt | Người dùng làm gì (vị trí trên màn hình) |
+|---|-----------|------------------------------------------|
+| **1 — Tự động** | Lần đầu mở app sau cài, hoặc khi `first_run_setup_required` / chưa hoàn tất onboarding | **Không cần click:** Wizard **tự hiện** (modal phủ cửa sổ chính hoặc thay thế tạm nội dung trung tâm). |
+| **2 — Menu** | Mở lại Wizard bất kỳ lúc nào | Thanh menu → **Tệp** → **«Trình hướng dẫn thiết lập quầy…»** (hoặc tên tương đương đã thống nhất trong bản dịch). |
+| **3 — Nút trên Quầy** | Từ chế độ vận hành hằng ngày | Trên **header** hoặc **góc màn hình Quầy**, bấm nút **«Thiết lập máy & quầy»** (hoặc **«Thiết lập»** / **«Cài đặt quầy»** — tránh trùng với **Tệp → Cài đặt** mở `SettingsDialog`). |
+| **4 — Từ Cài đặt** | Admin muốn chạy lại Wizard mà không nhớ menu Tệp | Trong **Cài đặt** (`SettingsDialog`): liên kết **«Chạy trình hướng dẫn thiết lập…»** (đặt cuối hộp thoại hoặc tab «Chung»). |
+| **5 — Khay** | App đang ẩn | **Chuột phải** icon khay → mục **«Thiết lập quầy…»** (mở Wizard hoặc đưa cửa sổ ra trước rồi mở Wizard). |
+
+**Phân biệt:** Wizard (**mục 12**) ≠ **Cài đặt** đầy đủ (**SettingsDialog**): Wizard = luồng từng bước cho người mới; Settings = tất cả tùy chọn + nhóm QR Winson (**6.3a**).
+
+### 12.2. Các bước trong Wizard (thứ tự)
+
+1. **Chào / số quầy:** chọn **một** hoặc **hai** quầy (hoặc bỏ qua nếu luôn hai quầy cố định).
+2. **Máy 1 — Camera:** chọn chỉ số webcam hoặc RTSP (nâng cao); xem trước tối thiểu hoặc «Thử kết nối».
+3. **Máy 1 — Máy quét:** chọn COM / HID / đọc mã bằng camera; **nếu không thấy COM** → hiện QR **`881001133.`** + nút làm mới (**6.3**).
+4. **Máy 1 — Tên quầy:** ô tên (ví dụ «Quầy A»).
+5. **Máy 2** — lặp bước 2–4 nếu bật hai quầy (hoặc một màn gộp tùy implement).
+6. **Hoàn tất:** lưu `config.json`, đặt cờ đã onboarding, chuyển sang **Quầy** (và bật full screen nếu cấu hình).
+
+Các bước có thể gộp trên một số màn hình miễn giữ **thứ tự nhận thức:** camera trước, máy quét sau, tên cuối.
+
+### 12.3. Ghi chú triển khai
+
+- Tên menu / nút trong **12.1** có thể tinh chỉnh copywriting nhưng **phải** giữ hai lối rõ: **Tệp → Trình hướng dẫn…** và **nút trên Quầy**.
+- Nếu sản phẩm dùng **PIN** để vào Cài đặt (**6.2**), có thể áp dụng tương tự cho nút mở Wizard trên Quầy (tuỳ nghiệp vụ).
 
 ---
 
