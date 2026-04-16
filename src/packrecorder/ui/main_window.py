@@ -2504,6 +2504,15 @@ class MainWindow(QMainWindow):
                 f"Mở thủ công trong Explorer:\n{p.parent}",
             )
 
+    def _launch_wizard_after_settings_closed(self) -> None:
+        QTimer.singleShot(0, self._open_setup_wizard)
+
+    def _on_startup_shortcut_hint_recorded(self) -> None:
+        if self._config.windows_startup_hint_shown:
+            return
+        self._config = replace(self._config, windows_startup_hint_shown=True)
+        save_config(self._config_path, self._config)
+
     def _on_test_notification(self, source: str) -> None:
         """Thử phát âm / khay từ Cài đặt — không lưu dialog; không đổi sound_mode đã lưu."""
         try:
@@ -2546,6 +2555,8 @@ class MainWindow(QMainWindow):
             self._config,
             self,
             on_test_notification=self._on_test_notification,
+            on_run_setup_wizard=self._launch_wizard_after_settings_closed,
+            on_startup_shortcut_created=self._on_startup_shortcut_hint_recorded,
         )
         try:
             if dlg.exec():

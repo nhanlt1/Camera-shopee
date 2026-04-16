@@ -55,11 +55,15 @@ class SettingsDialog(QDialog):
         parent=None,
         *,
         on_test_notification: Callable[[str], None] | None = None,
+        on_run_setup_wizard: Callable[[], None] | None = None,
+        on_startup_shortcut_created: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Cài đặt")
         self._cfg = cfg
         self._on_test_notification = on_test_notification
+        self._on_run_setup_wizard = on_run_setup_wizard
+        self._on_startup_shortcut_created = on_startup_shortcut_created
 
         self._root = QLineEdit(cfg.video_root)
         browse = QPushButton("Chọn…")
@@ -88,6 +92,27 @@ class SettingsDialog(QDialog):
         mode_layout.addWidget(self._mode_pip)
         mode_box = QGroupBox("Chế độ camera")
         mode_box.setLayout(mode_layout)
+
+        self._kiosk_hide_form = QCheckBox(
+            "Ẩn form thiết bị trên Quầy (chế độ hằng ngày)"
+        )
+        self._kiosk_hide_form.setChecked(cfg.default_to_kiosk)
+        self._kiosk_hide_form.setToolTip(
+            "Khi bật và đã hoàn tất thiết lập: chỉ thấy preview + trạng thái; "
+            "chi tiết thiết bị trong Wizard hoặc Cài đặt. Tắt để luôn thấy form chỉnh thiết bị trên Quầy."
+        )
+        self._kiosk_fullscreen = QCheckBox(
+            "Toàn màn hình khi khởi động (sau thiết lập)"
+        )
+        self._kiosk_fullscreen.setChecked(cfg.kiosk_fullscreen_on_start)
+        self._kiosk_fullscreen.setToolTip(
+            "Áp dụng khi chế độ Đa quầy và đã hoàn tất thiết lập lần đầu."
+        )
+        kiosk_layout = QVBoxLayout()
+        kiosk_layout.addWidget(self._kiosk_hide_form)
+        kiosk_layout.addWidget(self._kiosk_fullscreen)
+        kiosk_box = QGroupBox("Quầy hằng ngày (đa quầy)")
+        kiosk_box.setLayout(kiosk_layout)
 
         self._stack = QStackedWidget()
         self._build_page_single(cfg)
@@ -266,8 +291,20 @@ class SettingsDialog(QDialog):
         )
         _mini_warn.setWordWrap(True)
         _mini_warn.setStyleSheet("color:#555;font-size:smaller;")
+        self._mini_corner = QComboBox()
+        for val, label in (
+            ("bottom_right", "Dưới phải"),
+            ("bottom_left", "Dưới trái"),
+            ("top_right", "Trên phải"),
+            ("top_left", "Trên trái"),
+        ):
+            self._mini_corner.addItem(label, val)
+        _ix_corner = self._mini_corner.findData(cfg.mini_overlay_corner)
+        self._mini_corner.setCurrentIndex(max(0, _ix_corner))
+
         mf.addRow(self._mini_overlay_on)
         mf.addRow(self._mini_ct)
+        mf.addRow("Vị trí overlay", self._mini_corner)
         mf.addRow(_mini_warn)
 
         _repo_root = Path(__file__).resolve().parents[3]
@@ -318,6 +355,12 @@ class SettingsDialog(QDialog):
         )
         self._refresh_winson_qr_display(0)
 
+        btn_wizard = QPushButton("Mở trình hướng dẫn thiết lập quầy…")
+        btn_wizard.setToolTip(
+            "Đóng Cài đặt và mở Wizard từng bước (camera, máy quét, tên quầy)."
+        )
+        btn_wizard.clicked.connect(self._emit_run_setup_wizard)
+
         btn_startup = QPushButton("Tạo lối tắt trong thư mục Khởi động Windows…")
         btn_startup.setToolTip(
             "Tạo file .lnk trong shell:Startup — không ghi Registry. "
@@ -336,6 +379,7 @@ class SettingsDialog(QDialog):
         scroll_layout.setContentsMargins(0, 0, 0, 0)
         scroll_layout.setSpacing(8)
         scroll_layout.addWidget(mode_box)
+        scroll_layout.addWidget(kiosk_box)
         scroll_layout.addWidget(self._stack)
         scroll_layout.addLayout(common)
         scroll_layout.addWidget(vid_box)
@@ -368,6 +412,7 @@ class SettingsDialog(QDialog):
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(0)
         outer.addWidget(scroll, 1)
+        outer.addWidget(btn_wizard)
         outer.addWidget(btn_startup)
         outer.addWidget(buttons)
 
@@ -415,11 +460,25 @@ class SettingsDialog(QDialog):
                 f"Chi tiết: {e}",
             )
             return
+        msg = f"Đã ghi:\n{lnk}"
+        if not self._cfg.windows_startup_hint_shown:
+            msg += (
+                "\n\nLần sau đăng nhập Windows, Pack Recorder có thể chạy tự động "
+                "từ thư mục Khởi động."
+            )
         QMessageBox.information(
             self,
             "Đã tạo lối tắt",
-            f"Đã ghi:\n{lnk}",
+            msg,
         )
+        if self._on_startup_shortcut_created is not None:
+            self._on_startup_shortcut_created()
+
+    def _emit_run_setup_wizard(self) -> None:
+        cb = self._on_run_setup_wizard
+        self.reject()
+        if cb is not None:
+            cb()
 
     def _refresh_winson_qr_display(self, _id: int = 0) -> None:
         idx = 0
@@ -702,6 +761,9 @@ class SettingsDialog(QDialog):
             tray_health_beep_volume=float(self._health_vol.value()),
             mini_overlay_enabled=self._mini_overlay_on.isChecked(),
             mini_overlay_click_through=self._mini_ct.isChecked(),
+            mini_overlay_corner=str(self._mini_corner.currentData() or "bottom_right"),
+            default_to_kiosk=self._kiosk_hide_form.isChecked(),
+            kiosk_fullscreen_on_start=self._kiosk_fullscreen.isChecked(),
             enable_global_barcode_hook=False,
         )
         if self._mode_pip.isChecked():
