@@ -105,6 +105,7 @@ from packrecorder.ui.onboarding_banner import dual_station_banner_hint
 from packrecorder.ui.mini_status_overlay import MiniStatusOverlay
 from packrecorder.ui.window_title_summary import format_minimized_window_title
 from packrecorder.ui.preview_tab_policy import should_paint_quay_preview
+from packrecorder.ui.quay_menu_policy import should_show_top_level_search_action
 from packrecorder.ui.recording_search_dialog import RecordingSearchPanel
 from packrecorder.ui.settings_dialog import SettingsDialog
 from packrecorder.video_overlay import (
@@ -437,7 +438,11 @@ class MainWindow(QMainWindow):
 
         act_search = QAction("Mở tab Quản lý / tìm kiếm video", self)
         act_search.triggered.connect(self._open_recording_search)
-        self.menuBar().addAction(act_search)
+        has_management_tab = self._main_tabs.indexOf(self._search_panel) >= 0
+        if should_show_top_level_search_action(
+            has_management_tab=has_management_tab
+        ):
+            self.menuBar().addAction(act_search)
 
         self._purge_timer = QTimer(self)
         self._purge_timer.timeout.connect(self._run_retention)
