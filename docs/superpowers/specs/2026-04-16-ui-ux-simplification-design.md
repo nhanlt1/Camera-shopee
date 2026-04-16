@@ -146,6 +146,25 @@ Luồng cố định khớp yêu cầu:
 
 Hỗ trợ **hai quầy** lặp lại bước 1–3 cho cột 2 hoặc «Chỉ một quầy» để ẩn cột 2.
 
+**Khi máy quét chưa kết nối đúng (Wizard lần đầu):** nếu sau khi làm mới thiết bị vẫn **không có cổng COM** / phần mềm **không nhận diện** được máy quét (VID/PID, danh sách COM trống, v.v.), bước máy quét phải hiển thị rõ:
+
+- Hướng dẫn ngắn: cần chế độ **USB COM** để Pack Recorder đọc qua `pyserial`.
+- **Mã cấu hình khuyến nghị:** chuỗi `881001133.` (USB COM) — người dùng **quét mã này bằng chính máy quét** (đưa máy quét về đúng chế độ). Trên UI hiển thị **QR (và tùy chọn mã vạch 1D)** cùng chuỗi in được để không cần mở sách hướng dẫn giấy.
+- Sau khi quét xong: nút **«Thử lại / Làm mới thiết bị»** để probe lại COM.
+
+Tài liệu và file QR mẫu: mục **7.6** và thư mục `docs/scanner-config-codes/winson-mode-barcodes/`.
+
+### 6.3a. Cài đặt máy quét trong phần Settings (không phải Wizard)
+
+**Phạm vi:** màn **Cài đặt** / tab hoặc nhóm **«Máy quét / cổng COM»** — dành cho người đã vận hành, muốn **đổi chế độ** Winson mà không vào Wizard lần đầu.
+
+- Hiển thị **ba ô QR (hoặc ba mã vạch in được)** tương ứng ba chế độ, kèm nhãn ngắn:
+  - **USB COM** — `881001133.`
+  - **USB HID** — `881001131.`
+  - **USB Keyboard** — `881001124.`
+- Người dùng **quét đúng mã** trên màn hình (hoặc in tem dán) để chuyển máy quét sang chế độ mong muốn; sau đó **Làm mới thiết bị** và chọn cổng trong Pack Recorder.
+- **Khác Wizard:** ở đây luôn có đủ **ba** lựa chọn; Wizard lần đầu chỉ **nhấn mạnh USB COM** khi phát hiện lỗi/không nhận thiết bị.
+
 ### 6.4. Khởi động cùng Windows
 
 - Trong Setup hoặc Cài đặt nâng cao: nút **«Tạo lối tắt khởi động»** (shell:Startup) hoặc hướng dẫn 2 bước có ảnh chụp — **ưu tiên** không tự ghi Registry nếu chưa có consent rõ ràng.
@@ -177,7 +196,7 @@ Phần này cố định **nghiệp vụ triển khai** và **căn cứ phần c
 
 Mặc định nhiều máy quét dùng **USB-HID** (giả lập bàn phím). Để phù hợp kiến trúc «đọc COM trong luồng riêng», cần chuyển sang **cổng COM ảo (Virtual COM Port / VCP)**.
 
-1. **Thiết lập trên máy quét:** quét mã cấu hình có nhãn **`USB COM`** trong tài liệu *Quick Setting Manual* của Winson (thường nằm **Trang 1** — bảng mã cấu hình). Trong repo có tài liệu tham chiếu: `docs/scanner-config-codes/` (PDF/ảnh trang cấu hình).
+1. **Thiết lập trên máy quét:** quét **mã cấu hình** để bật **USB COM**. Chuỗi chính thức dùng trong dự án: **`881001133.`** (có dấu chấm cuối). Có thể dùng mã in trong *Quick Setting Manual* Winson hoặc **QR/ảnh** trong `docs/scanner-config-codes/winson-mode-barcodes/` (xem **7.6**). Thư mục `docs/scanner-config-codes/` cũng có PDF/ảnh trang cấu hình gốc.
 2. **Nhận diện trên Windows:**
    - Cắm máy quét vào PC.
    - **Device Manager** → **Ports (COM & LPT)** → ghi lại tên cổng (ví dụ `COM3`).
@@ -225,8 +244,38 @@ class BarcodeScannerWorker(QThread):
 
 ### 7.5. Liên kết với thiết kế UI (mục 6)
 
-- Wizard **Setup** (mục 6.3) nên có bước **«Máy quét COM (khuyến nghị — tránh lỗi IME)»** với hướng dẫn ngắn: quét mã **USB COM** trên Winson → chọn `COMx` → baud **115200**.
+- Wizard **Setup** (mục 6.3) nên có bước **«Máy quét COM (khuyến nghị — tránh lỗi IME)»** với hướng dẫn ngắn: quét mã **USB COM** (`881001133.`) trên Winson → chọn `COMx` → baud **115200**. Khi không nhận thiết bị: hiển thị QR/chuỗi (6.3).
+- **Settings — cài đặt máy quét** (mục 6.3a): hiển thị đủ ba mã chế độ (COM / HID / Keyboard) dưới dạng QR để đổi chế độ bất kỳ lúc nào.
 - Màn **Quầy** (mục 6.2) không cần ô nhập focus để nhận mã từ COM; vẫn nên hiển thị chip trạng thái khi COM lỗi (mục 6.5).
+
+### 7.6. Bảng mã cấu hình chế độ Winson (chuỗi quét + QR)
+
+Các giá trị sau là **chuỗi đầy đủ** cần gửi vào máy quét (kể cả ký tự `.` cuối). Dùng để: in tem, hiển thị trong UI (Settings + Wizard khi lỗi), hoặc tạo lại file ảnh bằng `scripts/generate_winson_mode_qrcodes.py`.
+
+| Chế độ | Chuỗi | Ghi chú |
+|--------|--------|---------|
+| **USB COM** | `881001133.` | Khớp Pack Recorder (`pyserial`); khuyến nghị vận hành. |
+| **USB HID** | `881001131.` | Tùy chọn nếu dùng luồng HID trong app. |
+| **USB Keyboard** | `881001124.` | Wedge bàn phím — dễ xung đột IME; không khuyến nghị cho COM-only. |
+
+**QR (PNG) trong repo** — nội dung mã hoá trùng chuỗi cột «Chuỗi»:
+
+| File | Đường dẫn |
+|------|-----------|
+| USB COM | [`docs/scanner-config-codes/winson-mode-barcodes/qr-usb-com.png`](../../scanner-config-codes/winson-mode-barcodes/qr-usb-com.png) |
+| USB HID | [`docs/scanner-config-codes/winson-mode-barcodes/qr-usb-hid.png`](../../scanner-config-codes/winson-mode-barcodes/qr-usb-hid.png) |
+| USB Keyboard | [`docs/scanner-config-codes/winson-mode-barcodes/qr-usb-keyboard.png`](../../scanner-config-codes/winson-mode-barcodes/qr-usb-keyboard.png) |
+
+Xem thêm bảng và hướng dẫn in: [`docs/scanner-config-codes/winson-mode-barcodes/README.md`](../../scanner-config-codes/winson-mode-barcodes/README.md).
+
+**Mã vạch 1D:** có thể tạo từ cùng chuỗi (Code128/Code39 tùy hỗ trợ máy quét) bằng phần mềm nhãn; UI ứng dụng có thể render sau (không bắt buộc trùng định dạng file với QR).
+
+**Preview ảnh QR (cùng nội dung với file PNG trong repo):**
+
+| USB COM | USB HID | USB Keyboard |
+|:-------:|:-------:|:------------:|
+| ![QR USB COM](../../scanner-config-codes/winson-mode-barcodes/qr-usb-com.png) | ![QR USB HID](../../scanner-config-codes/winson-mode-barcodes/qr-usb-hid.png) | ![QR USB Keyboard](../../scanner-config-codes/winson-mode-barcodes/qr-usb-keyboard.png) |
+| `881001133.` | `881001131.` | `881001124.` |
 
 ---
 
@@ -250,7 +299,9 @@ class BarcodeScannerWorker(QThread):
 | `src/packrecorder/app.py` | Khởi động Qt, stylesheet |
 | `docs/architecture-and-flow.md` | Kiến trúc tổng quan |
 | `src/packrecorder/serial_scan_worker.py` | Worker COM (`pyserial`, `QThread`), queue giới hạn, reconnect |
-| `docs/scanner-config-codes/` | Mã cấu hình Winson (USB COM, v.v.) — tham chiếu triển khai |
+| `docs/scanner-config-codes/` | Mã cấu hình Winson (PDF/ảnh gốc) |
+| `docs/scanner-config-codes/winson-mode-barcodes/` | QR PNG + README cho `881001133.` / `881001131.` / `881001124.` |
+| `scripts/generate_winson_mode_qrcodes.py` | Tạo lại file QR (cần `pip install qrcode[pil]`) |
 
 ---
 
@@ -258,7 +309,7 @@ class BarcodeScannerWorker(QThread):
 
 - **Giả định:** một máy trạm điển hình dùng 1–2 quầy; không mô tả chi tiết chế độ PIP/single trong màn Quầy (có thể vẫn dùng UI hiện tại cho các chế độ đó).
 - **Rủi ro:** full screen + Esc cần thiết kế cẩn thận để không khóa người dùng; nên giữ taskbar hoặc phím tắt thoát rõ ràng.
-- **Bước tiếp theo sau khi duyệt spec:** lập kế hoạch triển khai theo skill `writing-plans` (chia task: config flags, widget Quầy, wizard Setup, startup shortcut, tài liệu Winson COM trong onboarding, QA).
+- **Bước tiếp theo sau khi duyệt spec:** lập kế hoạch triển khai theo skill `writing-plans` (chia task: config flags, widget Quầy, wizard Setup + nhánh lỗi máy quét (QR `881001133.`), màn Settings máy quét (ba QR), startup shortcut, QA).
 
 ---
 
