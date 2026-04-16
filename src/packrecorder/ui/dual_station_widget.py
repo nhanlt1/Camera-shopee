@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QSizePolicy,
     QStyle,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -147,6 +148,7 @@ class DualStationWidget(QWidget):
         self._hid_usage_label: list[QLabel] = []
         self._scanner_selected_label: list[QLabel] = []
         self._tl_scan: list[QLabel] = []
+        self._adv_btn: list[QToolButton] = []
 
         columns = QHBoxLayout()
         for col in range(2):
@@ -234,6 +236,25 @@ class DualStationWidget(QWidget):
             kind_box.addStretch(1)
             kind_w = QWidget()
             kind_w.setLayout(kind_box)
+
+            adv_btn = QToolButton()
+            adv_btn.setText("Nâng cao")
+            adv_btn.setToolTip(
+                "Mở thêm: chọn RTSP (IP) và chỉnh vùng ROI đọc mã trên preview."
+            )
+            adv_btn.setCheckable(True)
+            adv_btn.setChecked(False)
+            adv_btn.setAutoRaise(True)
+            kind_row = QHBoxLayout()
+            kind_row.setContentsMargins(0, 0, 0, 0)
+            kind_row.addWidget(kind_w, 1)
+            kind_row.addWidget(adv_btn, 0, Qt.AlignmentFlag.AlignTop)
+            kind_row_w = QWidget()
+            kind_row_w.setLayout(kind_row)
+            self._adv_btn.append(adv_btn)
+            adv_btn.toggled.connect(
+                lambda checked, c=col: self._on_advanced_toggled(c, checked)
+            )
 
             tl_cam = QLabel("Camera ghi (mã nguồn)")
             tl_cam.setToolTip(
@@ -331,7 +352,7 @@ class DualStationWidget(QWidget):
             v_cam.addWidget(tl_name)
             v_cam.addWidget(ne)
             v_cam.addWidget(tl_cam)
-            v_cam.addWidget(kind_w)
+            v_cam.addWidget(kind_row_w)
             v_cam.addWidget(cw)
             w_cam = QWidget()
             w_cam.setLayout(v_cam)
@@ -440,6 +461,8 @@ class DualStationWidget(QWidget):
         root_layout.addWidget(self._top_bar, 0)
         root_layout.addLayout(columns, 1)
         self._refresh_layout_mode()
+        for c in range(2):
+            self._apply_advanced_visibility(c, False)
 
     def set_kiosk_mode(self, on: bool) -> None:
         """Quầy hằng ngày: ẩn form thiết bị; chi tiết qua Wizard / Cài đặt."""
@@ -506,6 +529,45 @@ class DualStationWidget(QWidget):
         self._record[col].setVisible(not rtsp)
         self._rtsp_url[col].setVisible(rtsp)
         self._rtsp_connect_btn[col].setVisible(rtsp)
+
+    def _rtsp_sticky_expanded(self, col: int) -> bool:
+        """Đang dùng RTSP đã lưu / đã «Kết nối» — không thu gọn được (spec §4)."""
+        if not (0 <= col < len(self._rtsp_armed)):
+            return False
+        return (
+            self._is_rtsp_column(col)
+            and bool(self._rtsp_url[col].text().strip())
+            and self._rtsp_armed[col]
+        )
+
+    def _on_advanced_toggled(self, col: int, checked: bool) -> None:
+        self._apply_advanced_visibility(col, checked)
+
+    def _apply_advanced_visibility(self, col: int, expanded: bool) -> None:
+        if not (0 <= col < len(self._record_kind)):
+            return
+        rb_rtsp = self._record_kind[col].button(1)
+        if expanded:
+            rb_rtsp.setVisible(True)
+            self._apply_record_kind_visibility(col)
+            self._refresh_preview_roi_lock(col)
+            return
+        rb_rtsp.setVisible(False)
+        if self._is_rtsp_column(col):
+            if self._rtsp_sticky_expanded(col):
+                rb_rtsp.setVisible(True)
+                if 0 <= col < len(self._adv_btn):
+                    with QSignalBlocker(self._adv_btn[col]):
+                        self._adv_btn[col].setChecked(True)
+                self._apply_record_kind_visibility(col)
+                self._refresh_preview_roi_lock(col)
+                return
+            bg = self._record_kind[col]
+            with QSignalBlocker(bg):
+                bg.button(0).setChecked(True)
+            self._on_record_kind_changed(col)
+        self._apply_record_kind_visibility(col)
+        self._refresh_preview_roi_lock(col)
 
     def _on_record_kind_changed(self, col: int) -> None:
         if self._is_rtsp_column(col) and not self._rtsp_url[col].text().strip():
@@ -1155,7 +1217,17 @@ class DualStationWidget(QWidget):
             self._apply_manual_order_readonly()
         self._refresh_layout_mode()
         for col in range(min(2, len(cfg.stations))):
-            self._refresh_preview_roi_lock(col)
+            s = cfg.stations[col]
+            is_rtsp_cfg = s.record_camera_kind == "rtsp" and (
+                s.record_rtsp_url or ""
+            ).strip()
+            need_adv = bool(
+                is_rtsp_cfg or self._preview_roi_unlocked_for_column(col)
+            )
+            if 0 <= col < len(self._adv_btn):
+                with QSignalBlocker(self._adv_btn[col]):
+                    self._adv_btn[col].setChecked(need_adv)
+            self._apply_advanced_visibility(col, need_adv)
 
     def duplicate_scanner_ports(self) -> bool:
         def key(col: int) -> tuple[str, str] | None:
