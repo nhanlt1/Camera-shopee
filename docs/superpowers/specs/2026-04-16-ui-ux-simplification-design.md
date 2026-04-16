@@ -164,7 +164,73 @@ Hỗ trợ **hai quầy** lặp lại bước 1–3 cho cột 2 hoặc «Chỉ m
 
 ---
 
-## 7. Phạm vi ngoài (YAGNI cho phiên bản thiết kế này)
+## 7. Tích hợp máy quét mã vạch chạy ngầm (chế độ USB COM)
+
+Phần này cố định **nghiệp vụ triển khai** và **căn cứ phần cứng** cho máy quét Winson, đồng thời khớp với kiến trúc đã có trong repo (đọc COM bằng `pyserial` trên luồng riêng, không đi qua bộ gõ). Chi tiết kỹ thuật luồng worker: `docs/architecture-and-flow.md` mục máy quét COM.
+
+### 7.1. Mục tiêu
+
+- Cho phép Pack Recorder nhận mã vạch khi ứng dụng **chạy ngầm** (thu nhỏ, ẩn cửa sổ, hoặc không focus) mà **không cần** focus vào ô nhập mã trong UI.
+- **Giảm sai lệch dữ liệu** do xung đột với bộ gõ tiếng Việt (Unikey, EVKey, …): khi máy quét ở chế độ giả lập bàn phím (USB-HID keyboard wedge), ký tự có thể bị biến dạng (ví dụ `SPX123W` → `SPX123ư`) nếu chuỗi đi qua IME. Chế độ **COM** đưa dữ liệu vào luồng serial, **không** qua buffer bàn phím Windows.
+
+### 7.2. Cấu hình phần cứng (Winson WAI-5780 / WAI-5770-USB)
+
+Mặc định nhiều máy quét dùng **USB-HID** (giả lập bàn phím). Để phù hợp kiến trúc «đọc COM trong luồng riêng», cần chuyển sang **cổng COM ảo (Virtual COM Port / VCP)**.
+
+1. **Thiết lập trên máy quét:** quét mã cấu hình có nhãn **`USB COM`** trong tài liệu *Quick Setting Manual* của Winson (thường nằm **Trang 1** — bảng mã cấu hình). Trong repo có tài liệu tham chiếu: `docs/scanner-config-codes/` (PDF/ảnh trang cấu hình).
+2. **Nhận diện trên Windows:**
+   - Cắm máy quét vào PC.
+   - **Device Manager** → **Ports (COM & LPT)** → ghi lại tên cổng (ví dụ `COM3`).
+   - Nếu Windows không tạo cổng COM: cài **Winson Virtual COM Driver** từ trang chủ hãng (hoặc gói driver kèm thiết bị), rồi cắm lại thiết bị.
+3. **Thông số nối tiếp mặc định (theo tài liệu hãng):** **115200** baud, **8** data bits, **không parity**, **1** stop bit (**8N1**). Trong Pack Recorder, baud và cổng lưu theo từng quầy trong `StationConfig` (đồng bộ với UI combo COM).
+
+### 7.3. Triển khai trong codebase (đối chiếu, không trùng lặp module)
+
+- **Thư viện:** `pyserial` (khai báo trong `pyproject.toml` / cài `pip install pyserial`).
+- **Module thực tế:** `src/packrecorder/serial_scan_worker.py` — `SerialScanWorker` (`QThread`): vòng lặp đọc `readline()` trên cổng đã mở, debounce, reconnect khi lỗi; phát tín hiệu về `MainWindow` qua **`QueuedConnection`** để xử lý mã đơn trên luồng UI.
+- **Mã giả** dưới đây chỉ minh hoạ **mô hình** (thread + signal); khi sửa code, ưu tiên mở rộng `SerialScanWorker` thay vì nhân đôi lớp tương tự:
+
+```python
+# Pseudo-code — mô hình tham khảo (logic thật: serial_scan_worker.SerialScanWorker)
+import serial
+from PySide6.QtCore import QThread, Signal
+
+class BarcodeScannerWorker(QThread):
+    barcode_received = Signal(str)
+
+    def __init__(self, port_name="COM3", baudrate=115200):
+        super().__init__()
+        self.port_name = port_name
+        self.baudrate = baudrate  # Winson VCP: thường 115200
+        self.running = True
+
+    def run(self):
+        with serial.Serial(self.port_name, baudrate=self.baudrate, timeout=1) as ser:
+            while self.running:
+                if ser.in_waiting > 0:
+                    line = ser.readline().decode("utf-8", errors="replace").strip()
+                    if line:
+                        self.barcode_received.emit(line)
+```
+
+### 7.4. Ưu điểm kiến trúc (COM so với wedge bàn phím)
+
+| Khía cạnh | Ý nghĩa vận hành |
+|-----------|-------------------|
+| **IME / Unikey** | Dữ liệu không đi qua pipeline bàn phím → hạn chế lỗi ký tự khi nhân viên đang gõ tiếng Việt ở app khác. |
+| **Non-blocking UX** | Nhân viên có thể dùng chuột, trình duyệt, cửa sổ khác; worker COM vẫn nhận dòng mã. Pack Recorder map mã vào `OrderStateMachine` và ghi video **không phụ thuộc** focus ô «Mã đơn» (đã cấu hình đúng nguồn quầy). |
+| **Chạy ngầm / khay** | Tương thích với tùy chọn **thu vào khay** (`minimize_to_tray`, `start_in_tray`): COM không yêu cầu cửa sổ đang foreground. |
+
+**Lưu ý:** «Kích hoạt WriterProcess» trong mô tả nghiệp vụ tương ứng với luồng ghi FFmpeg / `encode_writer_worker` trong tài liệu kiến trúc — không đổi tên class trong spec này; khi implement chỉ cần đảm bảo `_on_serial_decoded` → state machine → start/stop ghi vẫn nhất quán.
+
+### 7.5. Liên kết với thiết kế UI (mục 6)
+
+- Wizard **Setup** (mục 6.3) nên có bước **«Máy quét COM (khuyến nghị — tránh lỗi IME)»** với hướng dẫn ngắn: quét mã **USB COM** trên Winson → chọn `COMx` → baud **115200**.
+- Màn **Quầy** (mục 6.2) không cần ô nhập focus để nhận mã từ COM; vẫn nên hiển thị chip trạng thái khi COM lỗi (mục 6.5).
+
+---
+
+## 8. Phạm vi ngoài (YAGNI cho phiên bản thiết kế này)
 
 - Đổi kiến trúc pipeline multiprocessing.
 - Đa ngôn ngữ đầy đủ (chỉ Việt/Anh tối thiểu nếu cần).
@@ -172,7 +238,7 @@ Hỗ trợ **hai quầy** lặp lại bước 1–3 cho cột 2 hoặc «Chỉ m
 
 ---
 
-## 8. Phụ lục — file mã và tài liệu liên quan
+## 9. Phụ lục — file mã và tài liệu liên quan
 
 | File | Vai trò |
 |------|---------|
@@ -183,14 +249,16 @@ Hỗ trợ **hai quầy** lặp lại bước 1–3 cho cột 2 hoặc «Chỉ m
 | `src/packrecorder/config.py` | `AppConfig`, `StationConfig`, đường dẫn JSON |
 | `src/packrecorder/app.py` | Khởi động Qt, stylesheet |
 | `docs/architecture-and-flow.md` | Kiến trúc tổng quan |
+| `src/packrecorder/serial_scan_worker.py` | Worker COM (`pyserial`, `QThread`), queue giới hạn, reconnect |
+| `docs/scanner-config-codes/` | Mã cấu hình Winson (USB COM, v.v.) — tham chiếu triển khai |
 
 ---
 
-## 9. Ghi chú tự rà soát (spec)
+## 10. Ghi chú tự rà soát (spec)
 
 - **Giả định:** một máy trạm điển hình dùng 1–2 quầy; không mô tả chi tiết chế độ PIP/single trong màn Quầy (có thể vẫn dùng UI hiện tại cho các chế độ đó).
 - **Rủi ro:** full screen + Esc cần thiết kế cẩn thận để không khóa người dùng; nên giữ taskbar hoặc phím tắt thoát rõ ràng.
-- **Bước tiếp theo sau khi duyệt spec:** lập kế hoạch triển khai theo skill `writing-plans` (chia task: config flags, widget Quầy, wizard Setup, startup shortcut, QA).
+- **Bước tiếp theo sau khi duyệt spec:** lập kế hoạch triển khai theo skill `writing-plans` (chia task: config flags, widget Quầy, wizard Setup, startup shortcut, tài liệu Winson COM trong onboarding, QA).
 
 ---
 
