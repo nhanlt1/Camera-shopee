@@ -92,9 +92,10 @@ class DualStationWidget(QWidget):
     manual_order_submitted = Signal(int, str)
     rtsp_connect_requested = Signal(int, str)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, *, kiosk_mode: bool = False) -> None:
         super().__init__(parent)
         self._cinema_mode = False
+        self._kiosk_mode = bool(kiosk_mode)
         self._cam_indices: list[int] = [0, 1]
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -438,6 +439,47 @@ class DualStationWidget(QWidget):
         root_layout = QVBoxLayout(self)
         root_layout.addWidget(self._top_bar, 0)
         root_layout.addLayout(columns, 1)
+        self._refresh_layout_mode()
+
+    def set_kiosk_mode(self, on: bool) -> None:
+        """Quầy hằng ngày: ẩn form thiết bị; chi tiết qua Wizard / Cài đặt."""
+        on = bool(on)
+        if self._kiosk_mode == on:
+            return
+        self._kiosk_mode = on
+        self._refresh_layout_mode()
+
+    def _refresh_layout_mode(self) -> None:
+        """Đồng bộ cinema + kiosk: ẩn khối cấu hình thiết bị khi cần."""
+        hide_device = self._cinema_mode or self._kiosk_mode
+        self._top_bar.setVisible(not self._cinema_mode)
+        for fw in self._column_forms:
+            fw.setVisible(not hide_device)
+        for i, box in enumerate(self._group_boxes):
+            box.setFlat(self._cinema_mode)
+            if self._cinema_mode:
+                box.setTitle("")
+            elif self._kiosk_mode and i < len(self._name):
+                nm = (self._name[i].text() or "").strip() or f"Máy {i + 1}"
+                box.setTitle(nm)
+            else:
+                box.setTitle(f"Máy {i + 1}")
+        for prev in self._preview:
+            prev.set_fast_scale(not self._cinema_mode)
+            if self._cinema_mode:
+                prev.setMinimumSize(240, 180)
+                prev.setMaximumHeight(16_777_215)
+                prev.setSizePolicy(
+                    QSizePolicy.Policy.Expanding,
+                    QSizePolicy.Policy.Expanding,
+                )
+            else:
+                prev.setMinimumSize(360, 200)
+                prev.setMaximumHeight(280)
+                prev.setSizePolicy(
+                    QSizePolicy.Policy.Preferred,
+                    QSizePolicy.Policy.Preferred,
+                )
 
     def camera_indices_selected_in_ui(self) -> set[int]:
         return self._indices_from_combos()
@@ -1092,7 +1134,8 @@ class DualStationWidget(QWidget):
                         or self._usb_index_for_sync(cfg.stations[col], col)
                     ),
                 )
-        self._apply_manual_order_readonly()
+            self._apply_manual_order_readonly()
+        self._refresh_layout_mode()
 
     def duplicate_scanner_ports(self) -> bool:
         def key(col: int) -> tuple[str, str] | None:
@@ -1164,28 +1207,7 @@ class DualStationWidget(QWidget):
         if self._cinema_mode == on:
             return
         self._cinema_mode = on
-        self._top_bar.setVisible(not on)
-        for fw in self._column_forms:
-            fw.setVisible(not on)
-        for i, box in enumerate(self._group_boxes):
-            box.setFlat(on)
-            box.setTitle("" if on else f"Máy {i + 1}")
-        for prev in self._preview:
-            prev.set_fast_scale(not on)
-            if on:
-                prev.setMinimumSize(240, 180)
-                prev.setMaximumHeight(16_777_215)
-                prev.setSizePolicy(
-                    QSizePolicy.Policy.Expanding,
-                    QSizePolicy.Policy.Expanding,
-                )
-            else:
-                prev.setMinimumSize(360, 200)
-                prev.setMaximumHeight(280)
-                prev.setSizePolicy(
-                    QSizePolicy.Policy.Preferred,
-                    QSizePolicy.Policy.Preferred,
-                )
+        self._refresh_layout_mode()
 
     def preview_max_scale_px(self, col: int) -> int:
         """Cạnh dài tối đa khi scale pixmap (theo DPR), để preview sắc khi cửa sổ lớn."""

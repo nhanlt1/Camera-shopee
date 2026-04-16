@@ -15,6 +15,7 @@ from PySide6.QtGui import (
     QAction,
     QBrush,
     QDesktopServices,
+    QHideEvent,
     QIcon,
     QImage,
     QKeyEvent,
@@ -23,6 +24,7 @@ from PySide6.QtGui import (
     QColor,
     QPixmap,
     QPolygonF,
+    QResizeEvent,
     QShowEvent,
 )
 from PySide6.QtWidgets import (
@@ -37,6 +39,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QStackedWidget,
     QStatusBar,
+    QTabWidget,
     QSystemTrayIcon,
     QToolButton,
     QVBoxLayout,
@@ -94,7 +97,8 @@ from packrecorder.serial_scan_worker import SerialScanWorker
 from packrecorder.shutdown_scheduler import compute_next_shutdown_at
 from packrecorder.ui.countdown_dialog import ShutdownCountdownDialog
 from packrecorder.ui.dual_station_widget import DualStationWidget
-from packrecorder.ui.recording_search_dialog import RecordingSearchDialog
+from packrecorder.ui.mini_status_overlay import MiniStatusOverlay
+from packrecorder.ui.recording_search_dialog import RecordingSearchPanel
 from packrecorder.ui.settings_dialog import SettingsDialog
 from packrecorder.video_overlay import (
     RecordingBurnIn,
@@ -178,6 +182,31 @@ class MainWindow(QMainWindow):
                 w._shutdown_application(reason="atexit")
         except Exception:
             pass
+
+    def _kiosk_counter_ui(self) -> bool:
+        """Màn Quầy tối giản: ẩn form thiết bị (spec 6.2 / 11)."""
+        return (
+            self._config.multi_camera_mode == "stations"
+            and self._config.default_to_kiosk
+            and self._config.onboarding_complete
+        )
+
+    def defer_first_run_setup_if_needed(self) -> None:
+        if (
+            self._config.multi_camera_mode == "stations"
+            and self._config.first_run_setup_required
+            and not self._config.onboarding_complete
+        ):
+            self._open_setup_wizard()
+
+    def defer_kiosk_fullscreen_if_configured(self) -> None:
+        if (
+            self._config.multi_camera_mode == "stations"
+            and self._config.kiosk_fullscreen_on_start
+            and self._config.onboarding_complete
+            and not self._config.first_run_setup_required
+        ):
+            self.showFullScreen()
 
     def __init__(self) -> None:
         super().__init__()
@@ -265,7 +294,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._sync_indicator)
 
         self._stack = QStackedWidget()
-        self._dual_panel = DualStationWidget()
+        self._dual_panel = DualStationWidget(kiosk_mode=self._kiosk_counter_ui())
         self._dual_panel.fields_changed.connect(self._on_dual_fields_changed)
         self._dual_panel.rtsp_connect_requested.connect(self._on_rtsp_connect_requested)
         self._dual_panel.refresh_devices_requested.connect(self._on_dual_refresh_devices)
@@ -329,7 +358,14 @@ class MainWindow(QMainWindow):
         self._pin_btn.setDefaultAction(self._act_always_top)
         self._pin_btn.setText("Ghim")
 
+        self._btn_setup_wizard = QPushButton("Thiết lập máy & quầy")
+        self._btn_setup_wizard.setToolTip(
+            "Trình hướng dẫn cấu hình camera và máy quét cho từng quầy."
+        )
+        self._btn_setup_wizard.clicked.connect(self._open_setup_wizard)
+
         hrow.addWidget(self._pin_btn)
+        hrow.addWidget(self._btn_setup_wizard)
         hrow.addSpacing(8)
         hrow.addWidget(QLabel("Lưu file:"))
         hrow.addWidget(self._header_video_root, 1)
@@ -338,13 +374,36 @@ class MainWindow(QMainWindow):
         hrow.addWidget(QLabel("Độ phân giải:"))
         hrow.addWidget(self._record_resolution_combo)
 
+        self._counter_page = QWidget()
+        counter_layout = QVBoxLayout(self._counter_page)
+        counter_layout.setContentsMargins(0, 0, 0, 0)
+        counter_layout.setSpacing(0)
+        counter_layout.addWidget(header, 0)
+        counter_layout.addWidget(self._stack, 1)
+
+        self._search_panel = RecordingSearchPanel(
+            self._config,
+            office_search_stale=self._office_search_stale,
+            parent=self,
+        )
+
+        self._main_tabs = QTabWidget(self)
+        self._main_tabs.addTab(self._counter_page, "Quầy")
+        self._main_tabs.addTab(self._search_panel, "Quản lý")
+
         root = QWidget()
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
-        root_layout.addWidget(header, 0)
-        root_layout.addWidget(self._stack, 1)
+        root_layout.addWidget(self._main_tabs, 1)
         self.setCentralWidget(root)
+
+        self._mini_overlay = MiniStatusOverlay(self)
+        self._mini_overlay.hide()
+        self._mini_overlay.request_restore_main.connect(self._restore_from_mini_overlay)
+        self._mini_overlay_timer = QTimer(self)
+        self._mini_overlay_timer.setInterval(400)
+        self._mini_overlay_timer.timeout.connect(self._tick_mini_overlay)
 
         self._rebuild_order_machines()
         self._update_packer_message()
@@ -353,6 +412,9 @@ class MainWindow(QMainWindow):
         act = QAction("Cài đặt", self)
         act.triggered.connect(self._open_settings)
         m_settings.addAction(act)
+        act_wizard = QAction("Trình hướng dẫn thiết lập quầy…", self)
+        act_wizard.triggered.connect(self._open_setup_wizard)
+        m_settings.addAction(act_wizard)
         act_log = QAction("Mở thư mục nhật ký phiên…", self)
         act_log.setToolTip(
             "run_errors.log — nhật ký phiên (INFO khi khởi động là bình thường). "
@@ -361,7 +423,7 @@ class MainWindow(QMainWindow):
         act_log.triggered.connect(self._open_error_log_folder)
         m_settings.addAction(act_log)
 
-        act_search = QAction("Tìm kiếm video đã ghi", self)
+        act_search = QAction("Mở tab Quản lý / tìm kiếm video", self)
         act_search.triggered.connect(self._open_recording_search)
         self.menuBar().addAction(act_search)
 
@@ -432,6 +494,8 @@ class MainWindow(QMainWindow):
         menu = QMenu()
         act_show = menu.addAction("Hiện cửa sổ")
         act_show.triggered.connect(self._show_from_tray)
+        act_setup_tray = menu.addAction("Thiết lập quầy…")
+        act_setup_tray.triggered.connect(self._open_setup_wizard)
         menu.addSeparator()
         act_quit = menu.addAction("Thoát")
         act_quit.triggered.connect(self._quit_from_tray)
@@ -439,6 +503,7 @@ class MainWindow(QMainWindow):
         tray.activated.connect(self._on_tray_activated)
         tray.show()
         self._tray = tray
+        self._update_station_summary_displays()
 
     def _show_from_tray(self) -> None:
         self.showNormal()
@@ -476,6 +541,11 @@ class MainWindow(QMainWindow):
         )
         self._stop_all_recording_for_shutdown()
         self._cleanup_workers()
+        try:
+            self._mini_overlay.hide()
+            self._mini_overlay_timer.stop()
+        except Exception:
+            pass
 
     def _restart_tray_health_timer(self) -> None:
         self._tray_health_timer.stop()
@@ -1393,12 +1463,9 @@ class MainWindow(QMainWindow):
 
     def _open_recording_search(self) -> None:
         self._note_user_activity()
-        dlg = RecordingSearchDialog(
-            self._config,
-            office_search_stale=self._office_search_stale,
-            parent=self,
-        )
-        dlg.exec()
+        idx = self._main_tabs.indexOf(self._search_panel)
+        if idx >= 0:
+            self._main_tabs.setCurrentIndex(idx)
 
     def _required_camera_indices(self) -> set[int]:
         if self._config.multi_camera_mode == "single":
@@ -1686,6 +1753,83 @@ class MainWindow(QMainWindow):
                 col, self._station_recording_status_one_line(st, order, el)
             )
 
+    def _mini_overlay_line_pair(self) -> tuple[str, str]:
+        if self._config.multi_camera_mode != "stations":
+            return ("Pack Recorder", "—")
+        lines: list[str] = []
+        for st in self._config.stations[:2]:
+            oid = self._station_recording_order.get(st.station_id, "")
+            rec = self._recorders.get(st.station_id)
+            if rec is not None and oid:
+                short = oid if len(oid) <= 24 else oid[:21] + "…"
+                lines.append(f"{st.packer_label}: Đang ghi {short}")
+            elif rec is not None:
+                lines.append(f"{st.packer_label}: Đang ghi")
+            else:
+                lines.append(f"{st.packer_label}: Chờ quét")
+        while len(lines) < 2:
+            lines.append("—")
+        return (lines[0], lines[1])
+
+    def _update_station_summary_displays(self) -> None:
+        a, b = self._mini_overlay_line_pair()
+        if self._mini_overlay.isVisible():
+            self._mini_overlay.set_lines(a, b)
+        if self._tray is not None:
+            self._tray.setToolTip(f"Pack Recorder\n{a}\n{b}")
+
+    def _tick_mini_overlay(self) -> None:
+        self._update_station_summary_displays()
+
+    def _sync_mini_overlay_visibility(self) -> None:
+        if not self._config.mini_overlay_enabled:
+            self._mini_overlay.hide()
+            self._mini_overlay_timer.stop()
+            return
+        if self._config.multi_camera_mode != "stations":
+            self._mini_overlay.hide()
+            self._mini_overlay_timer.stop()
+            return
+        minimized = bool(self.windowState() & Qt.WindowState.WindowMinimized)
+        hidden = not self.isVisible()
+        if minimized or hidden:
+            self._update_station_summary_displays()
+            self._position_mini_overlay()
+            self._mini_overlay.set_click_through(self._config.mini_overlay_click_through)
+            self._mini_overlay.show()
+            self._mini_overlay.raise_()
+            if not self._mini_overlay_timer.isActive():
+                self._mini_overlay_timer.start()
+        else:
+            self._mini_overlay.hide()
+            self._mini_overlay_timer.stop()
+
+    def _position_mini_overlay(self) -> None:
+        screen = self.screen()
+        if screen is None:
+            return
+        geo = screen.availableGeometry()
+        self._mini_overlay.adjustSize()
+        sz = self._mini_overlay.sizeHint()
+        m = 12
+        corner = self._config.mini_overlay_corner
+        if corner == "bottom_left":
+            x, y = geo.left() + m, geo.bottom() - sz.height() - m
+        elif corner == "top_right":
+            x, y = geo.right() - sz.width() - m, geo.top() + m
+        elif corner == "top_left":
+            x, y = geo.left() + m, geo.top() + m
+        else:
+            x, y = geo.right() - sz.width() - m, geo.bottom() - sz.height() - m
+        self._mini_overlay.move(x, y)
+
+    def _restore_from_mini_overlay(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        self._mini_overlay.hide()
+        self._mini_overlay_timer.stop()
+
     def _sync_stations_recording_chip(self) -> None:
         if self._config.multi_camera_mode != "stations":
             return
@@ -1697,6 +1841,7 @@ class MainWindow(QMainWindow):
         if not active:
             self._chip.setText("Chờ quét mã đơn")
             self._chip.setStyleSheet(_CHIP_IDLE_STYLE)
+            self._update_station_summary_displays()
             return
         parts: list[str] = []
         for st in active:
@@ -1708,6 +1853,7 @@ class MainWindow(QMainWindow):
                 parts.append(st.packer_label)
         self._chip.setText("Đang ghi — " + "  |  ".join(parts))
         self._chip.setStyleSheet(_CHIP_REC_STYLE)
+        self._update_station_summary_displays()
 
     def _any_active_recorder(self) -> bool:
         return any(r is not None for r in self._recorders.values())
@@ -2408,6 +2554,56 @@ class MainWindow(QMainWindow):
                 self._rebuild_order_machines()
                 self._update_packer_message()
                 self._update_central_page()
+                self._dual_panel.set_kiosk_mode(self._kiosk_counter_ui())
+                self._sync_record_resolution_combo_from_config()
+                self._sync_always_on_top_from_config()
+                self._sync_header_video_root_from_config()
+                self._setup_system_tray()
+                self._restart_tray_health_timer()
+                qa = QApplication.instance()
+                if qa is not None:
+                    tray_ok = self._config.minimize_to_tray and self._tray is not None
+                    qa.setQuitOnLastWindowClosed(not tray_ok)
+        finally:
+            self._restart_scan_workers()
+
+    def _open_setup_wizard(self) -> None:
+        self._note_user_activity()
+        if any(r is not None for r in self._recorders.values()):
+            QMessageBox.warning(
+                self,
+                "Đang ghi hình",
+                "Vui lòng dừng ghi trước khi mở thiết lập quầy.",
+            )
+            return
+        self._pause_scan_workers()
+        try:
+            from packrecorder.ui.setup_wizard import SetupWizardDialog
+
+            dlg = SetupWizardDialog(self._config, self)
+            if dlg.exec():
+                self._config = dlg.result_config()
+                ensure_dual_stations(self._config)
+                self._config = normalize_config(self._config)
+                save_config(self._config_path, self._config)
+                self._feedback.update_config(self._config)
+                self._heartbeat_timer.setInterval(
+                    max(5_000, int(self._config.heartbeat_interval_ms))
+                )
+                self._restart_office_heartbeat_timer()
+                if self._sync_worker is not None:
+                    self._sync_worker.stop_worker()
+                    self._sync_worker.wait(4000)
+                    self._sync_worker = None
+                self._close_recording_index()
+                self._try_open_recording_index()
+                self._restart_sync_worker()
+                self._refresh_next_shutdown()
+                self._rebuild_order_machines()
+                self._update_packer_message()
+                self._update_central_page()
+                self._dual_panel.set_kiosk_mode(self._kiosk_counter_ui())
+                self._dual_panel.sync_from_config(self._config)
                 self._sync_record_resolution_combo_from_config()
                 self._sync_always_on_top_from_config()
                 self._sync_header_video_root_from_config()
@@ -2461,7 +2657,32 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event: QEvent) -> None:  # noqa: N802
         if event.type() == QEvent.Type.WindowStateChange:
             self._sync_dual_cinema_mode()
+            self._sync_mini_overlay_visibility()
         super().changeEvent(event)
+
+    def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self._sync_mini_overlay_visibility()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._mini_overlay.isVisible():
+            self._position_mini_overlay()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Escape and self.isFullScreen():
+            r = QMessageBox.question(
+                self,
+                "Thoát toàn màn hình",
+                "Thoát chế độ toàn màn hình?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if r == QMessageBox.StandardButton.Yes:
+                self.showNormal()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._shutdown_done:
@@ -2475,6 +2696,7 @@ class MainWindow(QMainWindow):
                 return
             event.ignore()
             self.hide()
+            self._sync_mini_overlay_visibility()
             self._tray.showMessage(
                 "Pack Recorder",
                 "Ứng dụng vẫn chạy nền. Mở lại từ biểu tượng khay hệ thống.",

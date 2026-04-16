@@ -217,17 +217,15 @@ def _resolve_video_path(row: dict) -> Path | None:
     return None
 
 
-class RecordingSearchDialog(QDialog):
+class RecordingSearchPanel(QWidget):
     def __init__(
         self,
         cfg: AppConfig,
         *,
         office_search_stale: bool,
-        parent=None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Tìm kiếm video đã ghi")
-        self.resize(920, 520)
         self._cfg = cfg
         self._last_rows: list[dict] = []
 
@@ -557,3 +555,23 @@ class RecordingSearchDialog(QDialog):
         finally:
             idx.close()
         self._run_search()
+
+
+class RecordingSearchDialog(QDialog):
+    """Hộp thoại độc lập; cùng nội dung nhúng tab qua RecordingSearchPanel."""
+
+    def __init__(
+        self,
+        cfg: AppConfig,
+        *,
+        office_search_stale: bool,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Tìm kiếm video đã ghi")
+        self.resize(920, 520)
+        lay = QVBoxLayout(self)
+        self._panel = RecordingSearchPanel(
+            cfg, office_search_stale=office_search_stale, parent=self
+        )
+        lay.addWidget(self._panel)

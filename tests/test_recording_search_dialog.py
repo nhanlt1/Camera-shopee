@@ -1,4 +1,11 @@
-from packrecorder.ui.recording_search_dialog import _format_created_at_display
+from packrecorder.ui.recording_search_dialog import (
+    RecordingSearchPanel,
+    _format_created_at_display,
+)
+
+
+def test_recording_search_panel_import() -> None:
+    assert RecordingSearchPanel is not None
 
 
 def test_format_created_at_display_iso() -> None:

@@ -166,6 +166,8 @@ def run_app() -> int:
     QTimer.singleShot(250, lambda: _windows_bring_to_front(w))
     QTimer.singleShot(800, lambda: _windows_bring_to_front(w))
     QTimer.singleShot(0, w.apply_start_in_tray)
+    QTimer.singleShot(150, w.defer_first_run_setup_if_needed)
+    QTimer.singleShot(900, w.defer_kiosk_fullscreen_if_configured)
     mark_session_phase(
         f"Đã show cửa sổ + lên lớp ({time.monotonic() - t_show:.3f}s)"
     )

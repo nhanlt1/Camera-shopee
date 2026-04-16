@@ -20,6 +20,11 @@ RecordCameraKind = Literal["usb", "rtsp"]
 # Camera IP RTSP (Đa quầy): id logic 10 = quầy 0, 11 = quầy 1 — không trùng index USB 0–9.
 STATION_RTSP_LOGICAL_ID_BASE = 10
 
+# Mã cấu hình chế độ máy quét Winson (quét vào thiết bị — có dấu chấm cuối). Spec 2026-04-16 §7.6
+WINSON_MODE_USB_COM = "881001133."
+WINSON_MODE_USB_HID = "881001131."
+WINSON_MODE_USB_KEYBOARD = "881001124."
+
 
 @dataclass
 class StationConfig:
@@ -65,7 +70,7 @@ def station_record_cam_id(st: StationConfig, station_index: int) -> int:
 
 @dataclass
 class AppConfig:
-    schema_version: int = 8
+    schema_version: int = 9
     video_root: str = ""
     camera_index: int = 0
     packer_label: str = "Máy 1"
@@ -133,6 +138,15 @@ class AppConfig:
     disk_warn_percent: float = 80.0
     disk_critical_percent: float = 90.0
     video_retention_keep_days: int = 16
+    # UI simplification / kiosk / wizard (spec 2026-04-16)
+    first_run_setup_required: bool = True
+    onboarding_complete: bool = False
+    default_to_kiosk: bool = True
+    kiosk_fullscreen_on_start: bool = False
+    mini_overlay_enabled: bool = True
+    mini_overlay_click_through: bool = False
+    mini_overlay_corner: str = "bottom_right"
+    windows_startup_hint_shown: bool = False
 
 
 def _station_from_dict(d: dict[str, Any]) -> StationConfig:
@@ -395,6 +409,19 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
         cfg.video_retention_keep_days = 0
     elif cfg.video_retention_keep_days > 3650:
         cfg.video_retention_keep_days = 3650
+    cfg.first_run_setup_required = bool(cfg.first_run_setup_required)
+    cfg.onboarding_complete = bool(cfg.onboarding_complete)
+    cfg.default_to_kiosk = bool(cfg.default_to_kiosk)
+    cfg.kiosk_fullscreen_on_start = bool(cfg.kiosk_fullscreen_on_start)
+    cfg.mini_overlay_enabled = bool(cfg.mini_overlay_enabled)
+    cfg.mini_overlay_click_through = bool(cfg.mini_overlay_click_through)
+    corner = str(cfg.mini_overlay_corner or "").strip().lower()
+    cfg.mini_overlay_corner = (
+        corner
+        if corner in ("bottom_right", "bottom_left", "top_right", "top_left")
+        else "bottom_right"
+    )
+    cfg.windows_startup_hint_shown = bool(cfg.windows_startup_hint_shown)
     # File heartbeat / máy phụ đọc: cùng cây thư mục với thư mục gốc video (không cấu hình riêng).
     cfg.status_json_relative = "PackRecorder/status.json"
     vr_root = (cfg.video_root or "").strip()
@@ -439,6 +466,14 @@ def load_config(path: Path) -> AppConfig:
         cfg.schema_version = 7
     if cfg.schema_version < 8:
         cfg.schema_version = 8
+    if cfg.schema_version < 9:
+        # Cài đặt cũ: không bắt Wizard lần đầu sau khi nâng schema.
+        cfg = replace(
+            cfg,
+            schema_version=9,
+            onboarding_complete=True,
+            first_run_setup_required=False,
+        )
     return normalize_config(cfg)
 
 

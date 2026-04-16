@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import uuid
 from collections.abc import Callable
@@ -7,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QGuiApplication, QPalette
+from PySide6.QtGui import QColor, QGuiApplication, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -34,6 +36,9 @@ from PySide6.QtWidgets import (
 )
 
 from packrecorder.config import (
+    WINSON_MODE_USB_COM,
+    WINSON_MODE_USB_HID,
+    WINSON_MODE_USB_KEYBOARD,
     AppConfig,
     MultiCameraMode,
     StationConfig,
@@ -243,6 +248,61 @@ class SettingsDialog(QDialog):
         tf.addRow("Bíp «còn sống» mỗi (phút), 0 = tắt", self._health_interval)
         tf.addRow("Âm lượng bíp (0–1)", self._health_vol)
 
+        _repo_root = Path(__file__).resolve().parents[3]
+        winson_box = QGroupBox("Máy quét Winson — mã cấu hình (quét vào thiết bị)")
+        winson_layout = QVBoxLayout(winson_box)
+        self._winson_r_com = QRadioButton("USB COM (khuyến nghị — đọc qua pyserial)")
+        self._winson_r_hid = QRadioButton("USB HID (HID POS trong app)")
+        self._winson_r_kb = QRadioButton("USB Keyboard (wedge bàn phím)")
+        self._winson_r_com.setChecked(True)
+        winson_grp = QButtonGroup(self)
+        winson_grp.addButton(self._winson_r_com, 0)
+        winson_grp.addButton(self._winson_r_hid, 1)
+        winson_grp.addButton(self._winson_r_kb, 2)
+        winson_grp.idClicked.connect(self._refresh_winson_qr_display)
+        winson_layout.addWidget(self._winson_r_com)
+        winson_layout.addWidget(self._winson_r_hid)
+        winson_layout.addWidget(self._winson_r_kb)
+        self._winson_pix = QLabel()
+        self._winson_pix.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._winson_str = QLabel()
+        self._winson_str.setWordWrap(True)
+        self._winson_str.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        winson_layout.addWidget(self._winson_pix)
+        winson_layout.addWidget(self._winson_str)
+        self._winson_paths = (
+            _repo_root
+            / "docs"
+            / "scanner-config-codes"
+            / "winson-mode-barcodes"
+            / "qr-usb-com.png",
+            _repo_root
+            / "docs"
+            / "scanner-config-codes"
+            / "winson-mode-barcodes"
+            / "qr-usb-hid.png",
+            _repo_root
+            / "docs"
+            / "scanner-config-codes"
+            / "winson-mode-barcodes"
+            / "qr-usb-keyboard.png",
+        )
+        self._winson_codes = (
+            WINSON_MODE_USB_COM,
+            WINSON_MODE_USB_HID,
+            WINSON_MODE_USB_KEYBOARD,
+        )
+        self._refresh_winson_qr_display(0)
+
+        btn_startup = QPushButton("Tạo lối tắt trong thư mục Khởi động Windows…")
+        btn_startup.setToolTip(
+            "Tạo file .lnk trong shell:Startup — không ghi Registry. "
+            "Cần quyền ghi thư mục Startup của user."
+        )
+        btn_startup.clicked.connect(self._create_windows_startup_shortcut)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Cancel
         )
@@ -258,6 +318,7 @@ class SettingsDialog(QDialog):
         scroll_layout.addLayout(common)
         scroll_layout.addWidget(vid_box)
         scroll_layout.addWidget(ha_box)
+        scroll_layout.addWidget(winson_box)
         scroll_layout.addWidget(tray_box)
 
         scroll = QScrollArea()
@@ -284,6 +345,7 @@ class SettingsDialog(QDialog):
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(0)
         outer.addWidget(scroll, 1)
+        outer.addWidget(btn_startup)
         outer.addWidget(buttons)
 
         screen = QGuiApplication.primaryScreen()
@@ -291,6 +353,72 @@ class SettingsDialog(QDialog):
             mh = int(screen.availableGeometry().height() * 0.88)
             self.setMaximumHeight(max(480, min(mh, 920)))
         self.resize(640, min(620, self.maximumHeight()))
+
+    def _create_windows_startup_shortcut(self) -> None:
+        target = Path(sys.executable)
+        startup = (
+            Path(os.environ.get("APPDATA", ""))
+            / "Microsoft"
+            / "Windows"
+            / "Start Menu"
+            / "Programs"
+            / "Startup"
+        )
+        startup.mkdir(parents=True, exist_ok=True)
+        lnk = startup / "Pack Recorder.lnk"
+        work_dir = str(target.parent.resolve())
+        ps = (
+            f'$s=(New-Object -ComObject WScript.Shell).CreateShortcut({str(lnk)!r});'
+            f'$s.TargetPath={str(target.resolve())!r};'
+            f'$s.WorkingDirectory={work_dir!r};'
+            f'$s.Save()'
+        )
+        try:
+            subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    ps,
+                ],
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as e:
+            QMessageBox.warning(
+                self,
+                "Không tạo được lối tắt",
+                f"Chi tiết: {e}",
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Đã tạo lối tắt",
+            f"Đã ghi:\n{lnk}",
+        )
+
+    def _refresh_winson_qr_display(self, _id: int = 0) -> None:
+        idx = 0
+        if self._winson_r_hid.isChecked():
+            idx = 1
+        elif self._winson_r_kb.isChecked():
+            idx = 2
+        path = self._winson_paths[idx]
+        pix = QPixmap(str(path))
+        if not pix.isNull():
+            self._winson_pix.setPixmap(
+                pix.scaled(
+                    180,
+                    180,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        self._winson_str.setText(
+            "Quét mã sau bằng máy Winson, rồi «Làm mới thiết bị» trên quầy:\n"
+            f"{self._winson_codes[idx]}"
+        )
 
     def _emit_test_notification(self) -> None:
         if self._on_test_notification is None:

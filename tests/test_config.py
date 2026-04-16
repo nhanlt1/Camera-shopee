@@ -18,6 +18,27 @@ from packrecorder.config import (
 )
 
 
+def test_schema_8_migrates_to_9_preserves_onboarding_skip_wizard(tmp_path: Path) -> None:
+    p = tmp_path / "c8.json"
+    p.write_text('{"schema_version": 8, "video_root": ""}', encoding="utf-8")
+    c = load_config(p)
+    assert c.schema_version == 9
+    assert c.onboarding_complete is True
+    assert c.first_run_setup_required is False
+
+
+def test_ui_simplification_flags_defaults() -> None:
+    c = normalize_config(AppConfig())
+    assert c.first_run_setup_required is True
+    assert c.onboarding_complete is False
+    assert c.default_to_kiosk is True
+    assert c.kiosk_fullscreen_on_start is False
+    assert c.mini_overlay_enabled is True
+    assert c.mini_overlay_click_through is False
+    assert c.mini_overlay_corner == "bottom_right"
+    assert c.windows_startup_hint_shown is False
+
+
 def test_tray_background_fields_defaults() -> None:
     c = normalize_config(AppConfig())
     assert c.minimize_to_tray is False
