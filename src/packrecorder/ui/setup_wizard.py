@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -22,7 +24,6 @@ from PySide6.QtWidgets import (
 )
 
 from packrecorder.camera_probe import probe_opencv_camera_indices
-from packrecorder.opencv_video import open_rtsp_capture
 from packrecorder.config import AppConfig, ensure_dual_stations, normalize_config
 from packrecorder.serial_ports import list_filtered_serial_ports
 from packrecorder.ui.dual_station_widget import (
@@ -31,7 +32,7 @@ from packrecorder.ui.dual_station_widget import (
     _merge_probe_with_config,
 )
 from packrecorder.ui.setup_wizard_camera import apply_wizard_camera_station
-from packrecorder.ui.setup_wizard_probe import validate_rtsp_probe_result
+from packrecorder.ui.setup_wizard_preview import SingleFramePreviewThread
 from packrecorder.ui.hid_pos_setup_wizard import HidPosSetupWizard
 from packrecorder.ui.setup_wizard_scanner import (
     apply_scanner_choice_camera_decode,
@@ -43,6 +44,45 @@ from packrecorder.ui.winson_com_qr_panel import WinsonComQrPanel
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
+
+
+def filter_camera_indices_for_wizard(
+    indices: list[int],
+    cfg: AppConfig,
+    col: int,
+) -> list[int]:
+    if col != 1 or not cfg.stations:
+        return list(indices)
+    st0 = cfg.stations[0]
+    if st0.record_camera_kind != "usb":
+        return list(indices)
+    used = int(st0.record_camera_index)
+    return [i for i in indices if int(i) != used]
+
+
+def filter_com_ports_for_wizard(
+    ports: list[tuple[str, str]],
+    cfg: AppConfig,
+    col: int,
+) -> list[tuple[str, str]]:
+    if col != 1 or not cfg.stations:
+        return list(ports)
+    used = (cfg.stations[0].scanner_serial_port or "").strip()
+    if not used:
+        return list(ports)
+    out: list[tuple[str, str]] = []
+    for dev, label in ports:
+        if (dev or "").strip() != used:
+            out.append((dev, label))
+    return out
+
+
+def scanner_default_mode_id(st: StationConfig) -> int:
+    """0: COM, 1: HID, 2: camera decode (manual chọn)."""
+    if st.scanner_input_kind == "hid_pos" and (st.scanner_usb_vid or "").strip():
+        return 1
+    # UX mới: mặc định COM cho thao tác vận hành kho.
+    return 0
 
 
 class IntroStationCountPage(QWizardPage):
@@ -89,6 +129,10 @@ class WizardCameraPage(QWizardPage):
         self._combo = QComboBox()
         usb_row = QHBoxLayout()
         usb_row.addWidget(self._combo, 1)
+        self._btn_usb_preview = QPushButton("Xem trước USB")
+        self._btn_usb_preview.setToolTip("Chụp 1 khung hình từ camera USB đang chọn.")
+        self._btn_usb_preview.clicked.connect(self._on_usb_preview)
+        usb_row.addWidget(self._btn_usb_preview)
         btn_usb_refresh = QPushButton("Làm mới danh sách camera")
         btn_usb_refresh.setToolTip("Quét lại webcam đã cắm (tương tự màn Quầy).")
         btn_usb_refresh.clicked.connect(self._on_usb_refresh_cameras)
@@ -104,12 +148,14 @@ class WizardCameraPage(QWizardPage):
         self._rtsp_url.setPlaceholderText(RTSP_DEFAULT_URL_BY_COLUMN[col])
         btn_rtsp_hint = QPushButton("Hướng dẫn kết nối RTSP…")
         btn_rtsp_hint.clicked.connect(self._on_rtsp_connection_hint)
-        btn_rtsp_test = QPushButton("Thử kết nối RTSP")
-        btn_rtsp_test.setToolTip("Mở RTSP ngắn để kiểm tra URL có phản hồi khung hình hay không.")
-        btn_rtsp_test.clicked.connect(self._on_test_rtsp_connection)
+        self._btn_rtsp_test = QPushButton("Thử kết nối + xem trước RTSP")
+        self._btn_rtsp_test.setToolTip(
+            "Mở luồng RTSP ngắn, chụp 1 khung hình rồi đóng ngay."
+        )
+        self._btn_rtsp_test.clicked.connect(self._on_test_rtsp_connection)
         rtsp_form = QFormLayout()
         rtsp_form.addRow("URL RTSP:", self._rtsp_url)
-        rtsp_form.addRow(btn_rtsp_test)
+        rtsp_form.addRow(self._btn_rtsp_test)
         rtsp_form.addRow(btn_rtsp_hint)
         w_rtsp = QWidget()
         w_rtsp.setLayout(rtsp_form)
@@ -128,7 +174,15 @@ class WizardCameraPage(QWizardPage):
         outer.addWidget(self._radio_usb)
         outer.addWidget(self._radio_rtsp)
         outer.addWidget(self._stack)
+        self._preview_label = QLabel("Chưa có ảnh xem trước.")
+        self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_label.setMinimumHeight(180)
+        self._preview_label.setStyleSheet(
+            "border:1px solid #cfd8dc;border-radius:4px;background:#fafafa;color:#607d8b;padding:8px;"
+        )
+        outer.addWidget(self._preview_label)
         outer.addWidget(hint)
+        self._preview_thread: SingleFramePreviewThread | None = None
 
     def _on_cam_kind_clicked(self, _bid: int) -> None:
         self._stack.setCurrentIndex(1 if self._radio_rtsp.isChecked() else 0)
@@ -139,7 +193,12 @@ class WizardCameraPage(QWizardPage):
         cfg = wiz._cfg
         probed = probe_opencv_camera_indices(max_index=6, require_frame=False)
         indices = _merge_probe_with_config(probed, cfg)
+        indices = filter_camera_indices_for_wizard(indices, cfg, self._col)
         self._combo.clear()
+        if not indices:
+            self._combo.addItem("(Không còn camera USB khả dụng)", None)
+            self._combo.setCurrentIndex(0)
+            return
         for i in indices:
             self._combo.addItem(f"Camera {i}", i)
         st = cfg.stations[self._col]
@@ -173,31 +232,48 @@ class WizardCameraPage(QWizardPage):
             "nhập URL và bấm «Kết nối RTSP». Có thể chỉnh thêm trong Cài đặt hoặc file cấu hình.",
         )
 
-    def _on_test_rtsp_connection(self) -> None:
-        url = self._rtsp_url.text().strip()
-        if not url:
-            QMessageBox.warning(
-                self,
-                "RTSP",
-                "Nhập URL RTSP trước khi thử kết nối.",
-            )
+    def _set_preview_busy(self, on: bool) -> None:
+        busy = bool(on)
+        self._btn_usb_preview.setEnabled(not busy)
+        self._btn_rtsp_test.setEnabled(not busy)
+        if busy:
+            self._preview_label.setText("Đang lấy ảnh xem trước…")
+
+    def _start_preview(self, th: SingleFramePreviewThread) -> None:
+        if self._preview_thread is not None and self._preview_thread.isRunning():
+            QMessageBox.information(self, "Xem trước", "Đang lấy ảnh xem trước, chờ chút…")
             return
-        cap = open_rtsp_capture(url)
-        try:
-            opened = bool(cap.isOpened())
-            ok_read, frame = cap.read() if opened else (False, None)
-            h = int(frame.shape[0]) if ok_read and frame is not None else 0
-            w = int(frame.shape[1]) if ok_read and frame is not None else 0
-            ok, msg = validate_rtsp_probe_result(opened and ok_read, w, h)
-        finally:
-            try:
-                cap.release()
-            except Exception:
-                pass
-        if ok:
-            QMessageBox.information(self, "RTSP", msg)
-        else:
-            QMessageBox.warning(self, "RTSP", msg)
+        self._preview_thread = th
+        self._set_preview_busy(True)
+        th.preview_ready.connect(self._on_preview_ready)
+        th.finished.connect(lambda: self._set_preview_busy(False))
+        th.start()
+
+    def _on_usb_preview(self) -> None:
+        rd = self._combo.currentData()
+        if rd is None:
+            QMessageBox.warning(self, "USB", "Không có camera USB để xem trước.")
+            return
+        self._start_preview(SingleFramePreviewThread.for_usb(int(rd), self))
+
+    def _on_test_rtsp_connection(self) -> None:
+        self._start_preview(SingleFramePreviewThread.for_rtsp(self._rtsp_url.text(), self))
+
+    def _on_preview_ready(self, ok: bool, msg: str, image_obj: object) -> None:
+        if ok and image_obj is not None:
+            pix = QPixmap.fromImage(image_obj)
+            self._preview_label.setPixmap(
+                pix.scaled(
+                    420,
+                    220,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            self._preview_label.setToolTip(msg)
+            return
+        self._preview_label.setPixmap(QPixmap())
+        self._preview_label.setText(msg)
 
     def initializePage(self) -> None:
         wiz = self.wizard()
@@ -222,6 +298,13 @@ class WizardCameraPage(QWizardPage):
         st = wiz._cfg.stations[self._col]
         if self._radio_usb.isChecked():
             rd = self._combo.currentData()
+            if rd is None:
+                QMessageBox.warning(
+                    self,
+                    "Camera USB",
+                    "Không còn camera USB để chọn cho Máy 2 (đang dùng ở Máy 1).",
+                )
+                return False
             rec = int(rd) if rd is not None else 0
             wiz._cfg.stations[self._col] = apply_wizard_camera_station(
                 st, self._col, use_usb=True, usb_index=rec, rtsp_url=""
@@ -335,7 +418,8 @@ class WizardScannerPage(QWizardPage):
         st = wiz._cfg.stations[self._col]
         self._mode_grp.blockSignals(True)
         try:
-            if st.scanner_input_kind == "hid_pos" and (st.scanner_usb_vid or "").strip():
+            mode_id = scanner_default_mode_id(st)
+            if mode_id == 1:
                 self._radio_hid.setChecked(True)
                 self._hid_vid = (st.scanner_usb_vid or "").strip().upper()
                 self._hid_pid = (st.scanner_usb_pid or "").strip().upper()
@@ -343,7 +427,7 @@ class WizardScannerPage(QWizardPage):
                     f"Đã chọn VID {self._hid_vid} / PID {self._hid_pid}"
                 )
                 self._stack.setCurrentIndex(1)
-            elif (st.scanner_serial_port or "").strip():
+            elif mode_id == 0:
                 self._radio_com.setChecked(True)
                 self._stack.setCurrentIndex(0)
                 self._refresh_ports()
@@ -361,6 +445,7 @@ class WizardScannerPage(QWizardPage):
         wiz = self.wizard()
         assert isinstance(wiz, SetupWizard)
         raw = list_filtered_serial_ports(try_open_ports=True)
+        raw = filter_com_ports_for_wizard(raw, wiz._cfg, self._col)
         self._combo.clear()
         self._combo.addItem("(Chưa chọn — đọc mã bằng camera)", "")
         for dev, label in raw:
@@ -372,7 +457,7 @@ class WizardScannerPage(QWizardPage):
                     self._combo.setCurrentIndex(i)
                     break
         on_com = self._stack.currentIndex() == 0
-        self._qr.setVisible(on_com and len(raw) == 0)
+        self._qr.setVisible(on_com)
 
     def validatePage(self) -> bool:
         wiz = self.wizard()
@@ -384,7 +469,8 @@ class WizardScannerPage(QWizardPage):
                 QMessageBox.warning(
                     self,
                     "Cổng COM",
-                    "Chọn cổng COM hoặc chọn «Đọc mã bằng camera».",
+                    "Chọn cổng COM. Nếu chưa thấy thiết bị, quét QR/Barcode bên dưới để chuyển COM,"
+                    " rồi bấm «Làm mới thiết bị».",
                 )
                 return False
             wiz._cfg.stations[self._col] = apply_scanner_choice_com(st, port=port)

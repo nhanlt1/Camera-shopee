@@ -6,6 +6,10 @@ venv/
 *.egg-info/
 dist/
 build/
+dist_fresh/
+dist-installer/
+*.rar
+.firecrawl/
 *.spec.bak
 
 # Phiên chạy / crash (không commit)

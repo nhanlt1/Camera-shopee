@@ -8,6 +8,12 @@ def test_recording_search_panel_import() -> None:
     assert RecordingSearchPanel is not None
 
 
+def test_recording_search_panel_manage_methods_exist() -> None:
+    assert hasattr(RecordingSearchPanel, "append_query_text")
+    assert hasattr(RecordingSearchPanel, "query_input_has_focus")
+    assert hasattr(RecordingSearchPanel, "_on_open_folder")
+
+
 def test_format_created_at_display_iso() -> None:
     assert _format_created_at_display("2026-04-08T12:30:00") == "08/04/2026  12:30"
 

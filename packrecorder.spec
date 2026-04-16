@@ -15,6 +15,8 @@ from PyInstaller.utils.hooks import (
 
 project_root = Path(SPECPATH)
 src = project_root / "src"
+logo_ico = project_root / "logo.ico"
+logo_jpg = project_root / "logo.jpg"
 
 block_cipher = None
 
@@ -30,6 +32,10 @@ extra_datas = [
         "packrecorder/ui",
     ),
 ]
+if logo_ico.is_file():
+    extra_datas.append((str(logo_ico), "."))
+if logo_jpg.is_file():
+    extra_datas.append((str(logo_jpg), "."))
 _ffmpeg_dir = project_root / "resources" / "ffmpeg"
 ffmpeg_exe = _ffmpeg_dir / "ffmpeg.exe"
 if ffmpeg_exe.is_file():
@@ -70,6 +76,10 @@ hiddenimports += [
     "pyzbar",
     "pyzbar.pyzbar",
     "serial",
+    "serial.tools",
+    "serial.tools.list_ports",
+    "serial.tools.list_ports_common",
+    "serial.tools.list_ports_windows",
     "hid",
     "hidapi",
     "packrecorder.barcode_decode",
@@ -125,6 +135,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(logo_ico) if logo_ico.is_file() else None,
 )
 
 coll = COLLECT(

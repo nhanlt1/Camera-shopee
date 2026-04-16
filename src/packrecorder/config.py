@@ -57,6 +57,13 @@ def default_stations() -> list[StationConfig]:
     ]
 
 
+def default_machine_id() -> str:
+    try:
+        return f"machine-{uuid.getnode():012x}"
+    except Exception:
+        return f"machine-{uuid.uuid4().hex[:12]}"
+
+
 def _normalize_record_camera_kind(value: object) -> RecordCameraKind:
     v = str(value or "").strip().lower()
     return "rtsp" if v == "rtsp" else "usb"
@@ -147,6 +154,10 @@ class AppConfig:
     mini_overlay_click_through: bool = False
     mini_overlay_corner: str = "bottom_right"
     windows_startup_hint_shown: bool = False
+    # Dashboard đa máy: dữ liệu thống kê dùng SQLite chia sẻ trên Drive.
+    software_id: str = "default"
+    machine_id: str = field(default_factory=default_machine_id)
+    analytics_shared_root_relative: str = "PackRecorder/analytics"
 
 
 def _station_from_dict(d: dict[str, Any]) -> StationConfig:
@@ -422,6 +433,12 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
         else "bottom_right"
     )
     cfg.windows_startup_hint_shown = bool(cfg.windows_startup_hint_shown)
+    sid = str(getattr(cfg, "software_id", "") or "").strip()
+    cfg.software_id = sid or "default"
+    mid = str(getattr(cfg, "machine_id", "") or "").strip()
+    cfg.machine_id = mid or default_machine_id()
+    analytics_root = str(getattr(cfg, "analytics_shared_root_relative", "") or "").strip()
+    cfg.analytics_shared_root_relative = analytics_root or "PackRecorder/analytics"
     # File heartbeat / máy phụ đọc: cùng cây thư mục với thư mục gốc video (không cấu hình riêng).
     cfg.status_json_relative = "PackRecorder/status.json"
     vr_root = (cfg.video_root or "").strip()

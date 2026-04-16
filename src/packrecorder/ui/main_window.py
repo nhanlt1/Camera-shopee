@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
-from PySide6.QtCore import QEvent, QPointF, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QPointF, QTime, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QAction,
     QBrush,
@@ -29,6 +29,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -41,12 +42,14 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QTabWidget,
     QSystemTrayIcon,
+    QTimeEdit,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from packrecorder.duplicate import is_duplicate_order
+from packrecorder.branding import load_application_qicon
 from packrecorder.config import (
     AppConfig,
     StationConfig,
@@ -70,6 +73,10 @@ from packrecorder.order_state import OrderStateMachine, ScanResult
 from packrecorder.heartbeat_consumer import office_heartbeat_state
 from packrecorder.paths import build_output_path
 from packrecorder.recording_index import RecordingIndex, open_recording_index
+from packrecorder.shared_analytics_db import (
+    append_shared_analytics_record,
+    shared_analytics_db_path,
+)
 from packrecorder.status_publish import publish_status_json
 from packrecorder.storage_resolver import choose_write_root
 from packrecorder.sync_worker import BackupSyncWorker
@@ -107,6 +114,7 @@ from packrecorder.ui.window_title_summary import format_minimized_window_title
 from packrecorder.ui.preview_tab_policy import should_paint_quay_preview
 from packrecorder.ui.quay_menu_policy import should_show_top_level_search_action
 from packrecorder.ui.recording_search_dialog import RecordingSearchPanel
+from packrecorder.ui.dashboard_tab import DashboardTab
 from packrecorder.ui.settings_dialog import SettingsDialog
 from packrecorder.video_overlay import (
     RecordingBurnIn,
@@ -221,6 +229,9 @@ class MainWindow(QMainWindow):
         MainWindow._active_ref = weakref.ref(self)
         self._did_startup_focus = False
         self.setWindowTitle("Pack Recorder")
+        _icon = load_application_qicon()
+        if _icon is not None:
+            self.setWindowIcon(_icon)
         self._config_path = default_config_path()
         self._config = load_config(self._config_path)
         ensure_dual_stations(self._config)
@@ -301,6 +312,21 @@ class MainWindow(QMainWindow):
         self._sync_indicator = QLabel("")
         self._sync_indicator.setMinimumWidth(160)
         self.statusBar().addPermanentWidget(self._sync_indicator)
+        self._shutdown_footer_wrap = QWidget(self)
+        shutdown_row = QHBoxLayout(self._shutdown_footer_wrap)
+        shutdown_row.setContentsMargins(0, 0, 0, 0)
+        shutdown_row.setSpacing(6)
+        self._shutdown_enable_checkbox = QCheckBox("Tự động tắt máy sau")
+        self._shutdown_time_edit = QTimeEdit(self)
+        self._shutdown_time_edit.setDisplayFormat("HH:mm")
+        shutdown_row.addWidget(self._shutdown_enable_checkbox)
+        shutdown_row.addWidget(self._shutdown_time_edit)
+        shutdown_row.addWidget(QLabel("hằng ngày"))
+        self.statusBar().addPermanentWidget(self._shutdown_footer_wrap)
+        self._shutdown_enable_checkbox.toggled.connect(
+            self._on_shutdown_footer_toggled
+        )
+        self._shutdown_time_edit.timeChanged.connect(self._on_shutdown_time_changed)
 
         self._stack = QStackedWidget()
         self._dual_panel = DualStationWidget(kiosk_mode=self._kiosk_counter_ui())
@@ -316,7 +342,6 @@ class MainWindow(QMainWindow):
         self._mode_hint.setStyleSheet("padding:24px;color:#555;")
         self._stack.addWidget(self._dual_panel)
         self._stack.addWidget(self._mode_hint)
-        self._update_central_page()
 
         self._header_title = QLabel("Pack Recorder")
         self._header_title.setStyleSheet("font-size:14px;font-weight:600;")
@@ -393,16 +418,25 @@ class MainWindow(QMainWindow):
         self._search_panel = RecordingSearchPanel(
             self._config,
             office_search_stale=self._office_search_stale,
+            retention_enabled=self._config.video_retention_keep_days > 0,
+            on_retention_controls_changed=self._on_retention_controls_changed,
+            parent=self,
+        )
+        self._dashboard_tab = DashboardTab(
+            fetch_rows=self._dashboard_fetch_rows,
+            fetch_packers=self._dashboard_fetch_packers,
             parent=self,
         )
 
         self._main_tabs = QTabWidget(self)
         self._main_tabs.addTab(self._counter_page, "Quầy")
         self._main_tabs.addTab(self._search_panel, "Quản lý")
+        self._main_tabs.addTab(self._dashboard_tab, "Thống kê")
         self._counter_tab_index = self._main_tabs.indexOf(self._counter_page)
         self._paint_quay_preview = True
         self._main_tabs.currentChanged.connect(self._sync_quay_preview_paint_flag)
         self._sync_quay_preview_paint_flag()
+        self._sync_footer_controls_from_config()
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -410,6 +444,7 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(0)
         root_layout.addWidget(self._main_tabs, 1)
         self.setCentralWidget(root)
+        self._update_central_page()
 
         self._mini_overlay = MiniStatusOverlay(self)
         self._mini_overlay.hide()
@@ -485,12 +520,14 @@ class MainWindow(QMainWindow):
         return self._make_tray_colored_icon(QColor(46, 125, 50))
 
     def _set_tray_icon_ok(self) -> None:
-        if self._tray is not None:
-            self._tray.setIcon(self._default_tray_icon_ok())
+        tray = getattr(self, "_tray", None)
+        if tray is not None:
+            tray.setIcon(self._default_tray_icon_ok())
 
     def _set_tray_icon_error(self) -> None:
-        if self._tray is not None:
-            self._tray.setIcon(self._make_tray_colored_icon(QColor(198, 40, 40)))
+        tray = getattr(self, "_tray", None)
+        if tray is not None:
+            tray.setIcon(self._make_tray_colored_icon(QColor(198, 40, 40)))
 
     def _setup_system_tray(self) -> None:
         if self._tray is not None:
@@ -808,6 +845,67 @@ class MainWindow(QMainWindow):
             main_tab_index=self._main_tabs.currentIndex(),
             counter_tab_index=self._counter_tab_index,
         )
+        self._sync_footer_tab_visibility()
+
+    def _sync_footer_tab_visibility(self) -> None:
+        if not hasattr(self, "_main_tabs"):
+            return
+        is_counter_tab = self._main_tabs.currentIndex() == self._counter_tab_index
+        self._shutdown_footer_wrap.setVisible(is_counter_tab)
+
+    def _sync_footer_controls_from_config(self) -> None:
+        enabled = bool(self._config.shutdown_enabled)
+        self._shutdown_enable_checkbox.blockSignals(True)
+        self._shutdown_enable_checkbox.setChecked(enabled)
+        self._shutdown_enable_checkbox.blockSignals(False)
+        t = QTime.fromString((self._config.shutdown_time_hhmm or "").strip(), "HH:mm")
+        if not t.isValid():
+            t = QTime(18, 0)
+        self._shutdown_time_edit.blockSignals(True)
+        self._shutdown_time_edit.setTime(t)
+        self._shutdown_time_edit.blockSignals(False)
+        self._shutdown_time_edit.setEnabled(enabled)
+
+    def _on_retention_controls_changed(self, enabled: bool, days: int) -> None:
+        self._note_user_activity()
+        keep_days = int(days) if enabled else 0
+        keep_days = max(0, min(3650, keep_days))
+        if keep_days == int(self._config.video_retention_keep_days):
+            return
+        self._config = replace(self._config, video_retention_keep_days=keep_days)
+        self._config = normalize_config(self._config)
+        save_config(self._config_path, self._config)
+        self._run_retention()
+
+    def _on_shutdown_footer_toggled(self, enabled: bool) -> None:
+        self._note_user_activity()
+        self._shutdown_time_edit.setEnabled(enabled)
+        hhmm = self._shutdown_time_edit.time().toString("HH:mm")
+        if (
+            bool(self._config.shutdown_enabled) == bool(enabled)
+            and (self._config.shutdown_time_hhmm or "").strip() == hhmm
+        ):
+            self._refresh_next_shutdown()
+            return
+        self._config = replace(
+            self._config,
+            shutdown_enabled=bool(enabled),
+            shutdown_time_hhmm=hhmm,
+        )
+        self._config = normalize_config(self._config)
+        save_config(self._config_path, self._config)
+        self._refresh_next_shutdown()
+
+    def _on_shutdown_time_changed(self, _time: QTime) -> None:
+        self._note_user_activity()
+        hhmm = self._shutdown_time_edit.time().toString("HH:mm")
+        if (self._config.shutdown_time_hhmm or "").strip() == hhmm:
+            self._refresh_next_shutdown()
+            return
+        self._config = replace(self._config, shutdown_time_hhmm=hhmm)
+        self._config = normalize_config(self._config)
+        save_config(self._config_path, self._config)
+        self._refresh_next_shutdown()
 
     def _deferred_stations_scan_and_probe(self) -> None:
         if self._config.multi_camera_mode != "stations":
@@ -1017,9 +1115,11 @@ class MainWindow(QMainWindow):
             self._refresh_mp_recording_and_preview()
             self._update_tray_icon_for_pipeline_health()
         except Exception:
+            import sys
+
             log_session_error(
                 "Lỗi trong _mp_service_tick (camera MP) — app không thoát.",
-                exc_info=True,
+                exc_info=sys.exc_info(),
             )
 
     def _refresh_mp_recording_and_preview(self) -> None:
@@ -1154,6 +1254,8 @@ class MainWindow(QMainWindow):
             if col is not None:
                 self._dual_panel.set_manual_order_text(col, text)
             self._handle_decode_station(station_id, text)
+            if self._search_panel.query_input_has_focus():
+                self._search_panel.append_query_text(text)
             if col is not None:
                 self._dual_panel.clear_manual_order_column(col)
         except Exception:
@@ -1196,9 +1298,11 @@ class MainWindow(QMainWindow):
             elif clicked == setup_btn:
                 QTimer.singleShot(0, self._open_setup_wizard)
         except Exception:
+            import sys
+
             log_session_error(
                 "Lỗi trong _on_mp_worker_error.",
-                exc_info=True,
+                exc_info=sys.exc_info(),
             )
 
     def _on_worker_capture_failed(self, cam_idx: int, message: str) -> None:
@@ -1211,9 +1315,11 @@ class MainWindow(QMainWindow):
             self._status.showMessage(message, 12000)
             self._set_tray_icon_error()
         except Exception:
+            import sys
+
             log_session_error(
                 "Lỗi trong _on_worker_capture_failed — app không thoát.",
-                exc_info=True,
+                exc_info=sys.exc_info(),
             )
 
     def _on_serial_failed(self, station_id: str, message: str) -> None:
@@ -1501,6 +1607,10 @@ class MainWindow(QMainWindow):
         primary_root = str(Path(self._config.video_root).resolve())
         backup_opt = (self._config.video_backup_root or "").strip()
         st_s = "synced" if meta["tag"] == "primary" else "pending_upload"
+        station_name = station_id
+        station = self._station_by_id(station_id)
+        if station is not None:
+            station_name = station.packer_label
         duration_s = 0.0
         try:
             started_dt = datetime.fromisoformat(str(meta["started"]))
@@ -1508,9 +1618,16 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             duration_s = 0.0
         try:
+            record_uid = (
+                f"{self._config.machine_id}|{station_name}|{meta['order']}|{meta['started']}|{meta['rel_key']}"
+            )
             self._recording_index.insert(
                 order_id=meta["order"],
                 packer=meta["packer"],
+                software_id=self._config.software_id,
+                machine_id=self._config.machine_id,
+                station_name=station_name,
+                record_uid=record_uid,
                 rel_key=meta["rel_key"],
                 storage_status=st_s,
                 primary_root=primary_root,
@@ -1521,6 +1638,22 @@ class MainWindow(QMainWindow):
             )
         except OSError as e:
             log_session_error(f"recording_index.insert failed: {e}")
+        try:
+            append_shared_analytics_record(
+                self._config,
+                order_id=meta["order"],
+                packer=meta["packer"],
+                station_name=station_name,
+                rel_key=meta["rel_key"],
+                storage_status=st_s,
+                primary_root=primary_root,
+                backup_root=backup_opt or None,
+                resolved_path=str(Path(meta["out"]).resolve()),
+                created_at=meta["started"],
+                duration_seconds=duration_s,
+            )
+        except OSError as e:
+            log_session_error(f"shared analytics insert failed: {e}")
         self._heartbeat_after_recording()
 
     def _open_recording_search(self) -> None:
@@ -1528,6 +1661,61 @@ class MainWindow(QMainWindow):
         idx = self._main_tabs.indexOf(self._search_panel)
         if idx >= 0:
             self._main_tabs.setCurrentIndex(idx)
+
+    def _dashboard_fetch_rows(
+        self,
+        from_iso: str,
+        to_iso: str,
+        packer: str | None,
+    ) -> list[dict[str, Any]]:
+        shared_db = shared_analytics_db_path(self._config)
+        db_path = (
+            shared_db
+            if shared_db is not None and shared_db.is_file()
+            else (
+                self._recording_index.db_path
+                if self._recording_index is not None
+                else None
+            )
+        )
+        if db_path is None or not db_path.is_file():
+            return []
+        idx = RecordingIndex(db_path)
+        idx.connect(uri_readonly=True)
+        try:
+            return idx.search_dashboard(
+                date_from=from_iso,
+                date_to=to_iso,
+                software_id=self._config.software_id,
+                packer=packer,
+                limit=5000,
+            )
+        finally:
+            idx.close()
+
+    def _dashboard_fetch_packers(self, from_iso: str, to_iso: str) -> list[str]:
+        shared_db = shared_analytics_db_path(self._config)
+        db_path = (
+            shared_db
+            if shared_db is not None and shared_db.is_file()
+            else (
+                self._recording_index.db_path
+                if self._recording_index is not None
+                else None
+            )
+        )
+        if db_path is None or not db_path.is_file():
+            return []
+        idx = RecordingIndex(db_path)
+        idx.connect(uri_readonly=True)
+        try:
+            return idx.distinct_packers(
+                date_from=from_iso,
+                date_to=to_iso,
+                software_id=self._config.software_id,
+            )
+        finally:
+            idx.close()
 
     def _required_camera_indices(self) -> set[int]:
         if self._config.multi_camera_mode == "single":
@@ -2247,6 +2435,7 @@ class MainWindow(QMainWindow):
             write_root, wtag = choose_write_root(primary, backup)
         except OSError as e:
             QMessageBox.warning(self, "Lưu trữ", str(e))
+            self._feedback.play_record_start_failed_alert()
             self._order_sm[station_id] = self._new_order_state_machine()
             self._clear_station_order_pending(station_id)
             return
@@ -2257,10 +2446,12 @@ class MainWindow(QMainWindow):
                 f"Đã có video cùng mã {short} trong ngày {t0.date().isoformat()} — ghi thêm file mới (tên có giờ phút).",
                 6000,
             )
+            self._feedback.play_duplicate_order_alert()
         try:
             ff = _resolve_ffmpeg(self._config)
         except FileNotFoundError:
             self._show_ffmpeg_missing_dialog()
+            self._feedback.play_record_start_failed_alert()
             self._order_sm[station_id] = self._new_order_state_machine()
             self._clear_station_order_pending(station_id)
             return
@@ -2319,6 +2510,7 @@ class MainWindow(QMainWindow):
                 )
             except OSError as e:
                 QMessageBox.warning(self, "Không bắt đầu ghi được", str(e))
+                self._feedback.play_record_start_failed_alert()
                 self._order_sm[station_id] = self._new_order_state_machine()
                 self._clear_station_order_pending(station_id)
                 return
@@ -2338,6 +2530,7 @@ class MainWindow(QMainWindow):
                 rec.start(out)
             except Exception as e:  # noqa: BLE001
                 QMessageBox.warning(self, "Không bắt đầu ghi được", str(e))
+                self._feedback.play_record_start_failed_alert()
                 self._order_sm[station_id] = self._new_order_state_machine()
                 self._clear_station_order_pending(station_id)
                 return
@@ -2379,6 +2572,7 @@ class MainWindow(QMainWindow):
             write_root, wtag = choose_write_root(primary, backup)
         except OSError as e:
             QMessageBox.warning(self, "Lưu trữ", str(e))
+            self._feedback.play_record_start_failed_alert()
             self._order_sm["pip"] = self._new_order_state_machine()
             return
         t0 = datetime.now()
@@ -2388,10 +2582,12 @@ class MainWindow(QMainWindow):
                 f"Đã có video cùng mã {short} trong ngày {t0.date().isoformat()} — ghi thêm file mới (tên có giờ phút).",
                 6000,
             )
+            self._feedback.play_duplicate_order_alert()
         try:
             ff = _resolve_ffmpeg(self._config)
         except FileNotFoundError:
             self._show_ffmpeg_missing_dialog()
+            self._feedback.play_record_start_failed_alert()
             self._order_sm["pip"] = self._new_order_state_machine()
             return
         out = build_output_path(
@@ -2420,6 +2616,7 @@ class MainWindow(QMainWindow):
             rec.start(out)
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "Không bắt đầu ghi được", str(e))
+            self._feedback.play_record_start_failed_alert()
             self._order_sm["pip"] = self._new_order_state_machine()
             return
         self._recorders["pip"] = rec
@@ -2656,6 +2853,7 @@ class MainWindow(QMainWindow):
                 self._sync_record_resolution_combo_from_config()
                 self._sync_always_on_top_from_config()
                 self._sync_header_video_root_from_config()
+                self._sync_footer_controls_from_config()
                 self._setup_system_tray()
                 self._restart_tray_health_timer()
                 self._mini_overlay.set_click_through(self._config.mini_overlay_click_through)
@@ -2711,6 +2909,7 @@ class MainWindow(QMainWindow):
                 self._sync_record_resolution_combo_from_config()
                 self._sync_always_on_top_from_config()
                 self._sync_header_video_root_from_config()
+                self._sync_footer_controls_from_config()
                 self._setup_system_tray()
                 self._restart_tray_health_timer()
                 qa = QApplication.instance()

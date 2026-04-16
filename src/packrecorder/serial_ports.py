@@ -140,9 +140,12 @@ def _try_open_port(device: str) -> bool:
 def iter_raw_comports() -> list[Any]:
     try:
         from serial.tools import list_ports as serial_list_ports
-    except ImportError:
+    except Exception:
         return []
-    return list(serial_list_ports.comports())
+    try:
+        return list(serial_list_ports.comports())
+    except Exception:
+        return []
 
 
 def list_filtered_serial_ports(*, try_open_ports: bool = True) -> list[tuple[str, str]]:

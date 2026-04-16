@@ -4,8 +4,9 @@ import shutil
 from datetime import datetime
 from functools import partial
 from pathlib import Path
+from typing import Callable
 
-from PySide6.QtCore import QDate, QSize, Qt, QUrl
+from PySide6.QtCore import QDate, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -21,6 +22,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QDateEdit,
     QDialog,
     QDialogButtonBox,
@@ -33,8 +35,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QStyle,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -218,16 +222,21 @@ def _resolve_video_path(row: dict) -> Path | None:
 
 
 class RecordingSearchPanel(QWidget):
+    retention_controls_changed = Signal(bool, int)
+
     def __init__(
         self,
         cfg: AppConfig,
         *,
         office_search_stale: bool,
+        retention_enabled: bool | None = None,
+        on_retention_controls_changed: Callable[[bool, int], None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._cfg = cfg
         self._last_rows: list[dict] = []
+        self._on_retention_controls_changed = on_retention_controls_changed
 
         _ = office_search_stale  # API giữ tương thích; không còn popup «dữ liệu trễ»
 
@@ -294,6 +303,24 @@ class RecordingSearchPanel(QWidget):
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.doubleClicked.connect(self._on_double_click)
 
+        keep_days = max(1, int(self._cfg.video_retention_keep_days or 0))
+        self._retention_enabled = (
+            bool(retention_enabled)
+            if retention_enabled is not None
+            else int(self._cfg.video_retention_keep_days or 0) > 0
+        )
+        self._retention_checkbox = QCheckBox("Tự xóa video sau")
+        self._retention_checkbox.setChecked(self._retention_enabled)
+        self._retention_days = QSpinBox()
+        self._retention_days.setRange(1, 3650)
+        self._retention_days.setValue(keep_days)
+        self._retention_days.setEnabled(self._retention_enabled)
+        self._retention_days.setSuffix(" ngày")
+        self._retention_checkbox.toggled.connect(self._on_retention_toggled)
+        self._retention_days.valueChanged.connect(self._on_retention_value_changed)
+        if self._on_retention_controls_changed is not None:
+            self.retention_controls_changed.connect(self._on_retention_controls_changed)
+
         search_btn = QPushButton("Tìm")
         search_btn.setDefault(True)
         search_btn.clicked.connect(self._run_search)
@@ -316,10 +343,17 @@ class RecordingSearchPanel(QWidget):
         lay.addLayout(filter_row)
         lay.addWidget(
             QLabel(
-                "Kết quả: double-click một dòng để mở file, hoặc bấm «Lưu bản sao…» để chọn nơi lưu."
+                "Kết quả: double-click một dòng để mở file; nút tải/mở thư mục nằm ở cột thao tác."
             )
         )
         lay.addWidget(self._table)
+        retention_row = QHBoxLayout()
+        retention_row.setContentsMargins(0, 0, 0, 0)
+        retention_row.setSpacing(8)
+        retention_row.addWidget(self._retention_checkbox)
+        retention_row.addWidget(self._retention_days)
+        retention_row.addStretch()
+        lay.addLayout(retention_row)
 
         dbp = recordings_db_path_for_search(cfg)
         self._db_ok_for_search = dbp is not None and dbp.is_file()
@@ -433,32 +467,44 @@ class RecordingSearchPanel(QWidget):
             wrap = QWidget()
             wrap_l = QHBoxLayout(wrap)
             wrap_l.setContentsMargins(0, 0, 0, 0)
-            wrap_l.setSpacing(6)
-            btn_copy = QPushButton("Lưu bản sao…")
-            btn_copy.setStyleSheet(
-                "QPushButton { font-size: 10px; padding: 2px 6px; }"
+            wrap_l.setSpacing(2)
+            app_style = app.style() if app is not None else None
+            download_icon = (
+                app_style.standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
+                if app_style is not None
+                else QIcon()
             )
-            btn_copy.clicked.connect(partial(self._on_save_copy, i))
-            btn_delete = QPushButton()
+            folder_icon = (
+                app_style.standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
+                if app_style is not None
+                else QIcon()
+            )
+            btn_download = QToolButton()
+            btn_download.setIcon(download_icon)
+            btn_download.setIconSize(QSize(16, 16))
+            btn_download.setToolTip("Tải video")
+            btn_download.setAccessibleName("Tải video")
+            btn_download.setAutoRaise(True)
+            btn_download.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_download.clicked.connect(partial(self._on_save_copy, i))
+            btn_open_folder = QToolButton()
+            btn_open_folder.setIcon(folder_icon)
+            btn_open_folder.setIconSize(QSize(16, 16))
+            btn_open_folder.setToolTip("Mở folder")
+            btn_open_folder.setAccessibleName("Mở folder")
+            btn_open_folder.setAutoRaise(True)
+            btn_open_folder.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_open_folder.clicked.connect(partial(self._on_open_folder, i))
+            btn_delete = QToolButton()
             btn_delete.setIcon(trash_icon)
-            btn_delete.setIconSize(QSize(14, 14))
+            btn_delete.setIconSize(QSize(16, 16))
             btn_delete.setToolTip("Xóa file video và xóa khỏi danh sách.")
             btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
             btn_delete.setAccessibleName("Xóa video")
-            btn_delete.setStyleSheet(
-                "QPushButton {"
-                "  background-color: #c62828;"
-                "  border: 1px solid #b71c1c;"
-                "  border-radius: 3px;"
-                "  padding: 2px 4px;"
-                "  min-width: 22px;"
-                "  min-height: 20px;"
-                "}"
-                "QPushButton:hover { background-color: #e53935; }"
-                "QPushButton:pressed { background-color: #8e0000; }"
-            )
+            btn_delete.setAutoRaise(True)
             btn_delete.clicked.connect(partial(self._on_delete_video, i))
-            wrap_l.addWidget(btn_copy)
+            wrap_l.addWidget(btn_download)
+            wrap_l.addWidget(btn_open_folder)
             wrap_l.addWidget(btn_delete)
             self._table.setCellWidget(i, 6, wrap)
 
@@ -501,6 +547,42 @@ class RecordingSearchPanel(QWidget):
         box.exec()
         if box.clickedButton() == open_btn:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(dst_path.parent)))
+
+    def _on_open_folder(self, row_index: int) -> None:
+        if row_index < 0 or row_index >= len(self._last_rows):
+            return
+        row = self._last_rows[row_index]
+        src = _resolve_video_path(row)
+        if src is None:
+            QMessageBox.warning(
+                self,
+                "Không tìm thấy file",
+                "Không thấy file video trên máy này (có thể đã đổi ổ hoặc chưa đồng bộ).",
+            )
+            return
+        if src.parent.is_dir():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(src.parent.resolve())))
+            return
+        QMessageBox.warning(self, "Không mở được folder", "Thư mục chứa file không tồn tại.")
+
+    def _on_retention_toggled(self, checked: bool) -> None:
+        self._retention_days.setEnabled(checked)
+        self.retention_controls_changed.emit(bool(checked), int(self._retention_days.value()))
+
+    def _on_retention_value_changed(self, value: int) -> None:
+        self.retention_controls_changed.emit(
+            bool(self._retention_checkbox.isChecked()), int(value)
+        )
+
+    def append_query_text(self, raw: str) -> None:
+        txt = str(raw or "")
+        if not txt:
+            return
+        self._q.setText(self._q.text() + txt)
+        self._q.setCursorPosition(len(self._q.text()))
+
+    def query_input_has_focus(self) -> bool:
+        return self._q.hasFocus()
 
     def _on_double_click(self, index) -> None:
         if index.column() == 6:

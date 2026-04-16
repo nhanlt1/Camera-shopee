@@ -108,7 +108,15 @@ class FeedbackPlayer:
         QTimer.singleShot(gap, self.play_short)
 
     def play_duplicate_order_alert(self) -> None:
-        """Trùng đơn: dùng tiếng «báo lỗi» mặc định của Windows (MessageBeep)."""
+        """Trùng đơn: theo UX mới dùng tiếng bíp dài."""
+        self.play_long()
+
+    def play_record_start_failed_alert(self) -> None:
+        """Đã quét mã nhưng không bắt đầu ghi được."""
+        self.play_long()
+
+    def _play_duplicate_system_alert(self) -> None:
+        """Legacy behavior: hệ thống lỗi Windows (giữ lại để fallback nếu cần)."""
         if not self._cfg.sound_enabled:
             return
         if sys.platform == "win32":
@@ -134,8 +142,8 @@ class FeedbackPlayer:
         self._schedule_short_burst(4, gap)
 
     def play_quad(self) -> None:
-        """Tương thích cũ — ưu tiên tiếng hệ thống trên Windows."""
-        self.play_duplicate_order_alert()
+        """Tương thích cũ — chuyển sang bíp dài đồng nhất."""
+        self.play_long()
 
     def _schedule_short_burst(self, count: int, gap_ms: int) -> None:
         if count <= 0:

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 
+def _format_disconnect_minutes(age_seconds: float) -> str:
+    mins = max(0, int(round(float(age_seconds) / 60.0)))
+    return f"{mins} phút"
+
+
 def office_heartbeat_state(
     age_seconds: float,
     *,
@@ -16,11 +21,11 @@ def office_heartbeat_state(
     if age_seconds <= stale_s:
         return (
             "yellow",
-            "Có thể trễ — kiểm tra máy đóng gói hoặc Drive",
+            f"Có thể trễ — mất kết nối khoảng {_format_disconnect_minutes(age_seconds)}; kiểm tra máy đóng gói hoặc Drive",
             False,
         )
     return (
         "red",
-        "CẢNH BÁO: Mất kết nối với máy đóng gói (có thể do lỗi Drive hoặc mất mạng)",
+        f"CẢNH BÁO: Mất kết nối với máy đóng gói khoảng {_format_disconnect_minutes(age_seconds)} (có thể do lỗi Drive hoặc mất mạng)",
         True,
     )

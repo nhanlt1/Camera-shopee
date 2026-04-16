@@ -13,6 +13,10 @@ CREATE TABLE IF NOT EXISTS recordings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   order_id TEXT NOT NULL,
   packer TEXT NOT NULL,
+  software_id TEXT NOT NULL DEFAULT 'default',
+  machine_id TEXT NOT NULL DEFAULT '',
+  station_name TEXT NOT NULL DEFAULT '',
+  record_uid TEXT NOT NULL DEFAULT '',
   rel_key TEXT NOT NULL,
   storage_status TEXT NOT NULL,
   primary_root TEXT NOT NULL,
@@ -121,6 +125,10 @@ class RecordingIndex:
         *,
         order_id: str,
         packer: str,
+        software_id: str = "default",
+        machine_id: str = "",
+        station_name: str = "",
+        record_uid: str = "",
         rel_key: str,
         storage_status: str,
         primary_root: str,
@@ -132,11 +140,15 @@ class RecordingIndex:
         assert self._conn
         self._conn.execute(
             """INSERT INTO recordings
-            (order_id, packer, rel_key, storage_status, primary_root, backup_root, resolved_path, created_at, duration_seconds)
-            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (order_id, packer, software_id, machine_id, station_name, record_uid, rel_key, storage_status, primary_root, backup_root, resolved_path, created_at, duration_seconds)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 order_id,
                 packer,
+                software_id or "default",
+                machine_id or "",
+                station_name or "",
+                record_uid or "",
                 rel_key,
                 storage_status,
                 primary_root,
@@ -147,6 +159,47 @@ class RecordingIndex:
             ),
         )
         self._conn.commit()
+
+    def insert_ignore_duplicate(
+        self,
+        *,
+        order_id: str,
+        packer: str,
+        software_id: str = "default",
+        machine_id: str = "",
+        station_name: str = "",
+        record_uid: str,
+        rel_key: str,
+        storage_status: str,
+        primary_root: str,
+        backup_root: str | None,
+        resolved_path: str,
+        created_at: str,
+        duration_seconds: float = 0.0,
+    ) -> bool:
+        assert self._conn
+        cur = self._conn.execute(
+            """INSERT OR IGNORE INTO recordings
+            (order_id, packer, software_id, machine_id, station_name, record_uid, rel_key, storage_status, primary_root, backup_root, resolved_path, created_at, duration_seconds)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                order_id,
+                packer,
+                software_id or "default",
+                machine_id or "",
+                station_name or "",
+                record_uid,
+                rel_key,
+                storage_status,
+                primary_root,
+                backup_root or "",
+                resolved_path,
+                created_at,
+                float(max(0.0, duration_seconds)),
+            ),
+        )
+        self._conn.commit()
+        return int(cur.rowcount or 0) > 0
 
     def delete_by_id(self, row_id: int) -> None:
         assert self._conn
@@ -203,13 +256,83 @@ class RecordingIndex:
         cur = self._conn.execute(q, args)
         return [dict(r) for r in cur.fetchall()]
 
+    def search_dashboard(
+        self,
+        *,
+        date_from: str,
+        date_to: str,
+        software_id: str | None = None,
+        packer: str | None = None,
+        machine_id: str | None = None,
+        station_name: str | None = None,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        assert self._conn
+        q = "SELECT * FROM recordings WHERE created_at >= ? AND created_at <= ?"
+        args: list[Any] = [date_from, date_to]
+        if software_id:
+            q += " AND software_id = ?"
+            args.append(software_id)
+        if packer:
+            q += " AND packer = ?"
+            args.append(packer)
+        if machine_id:
+            q += " AND machine_id = ?"
+            args.append(machine_id)
+        if station_name:
+            q += " AND station_name = ?"
+            args.append(station_name)
+        q += " ORDER BY created_at DESC LIMIT ?"
+        args.append(max(50, min(20000, int(limit))))
+        cur = self._conn.execute(q, args)
+        return [dict(r) for r in cur.fetchall()]
+
+    def distinct_packers(
+        self,
+        *,
+        date_from: str,
+        date_to: str,
+        software_id: str | None = None,
+    ) -> list[str]:
+        assert self._conn
+        q = "SELECT DISTINCT packer FROM recordings WHERE created_at >= ? AND created_at <= ?"
+        args: list[Any] = [date_from, date_to]
+        if software_id:
+            q += " AND software_id = ?"
+            args.append(software_id)
+        q += " ORDER BY packer ASC"
+        cur = self._conn.execute(q, args)
+        return [str(r[0]) for r in cur.fetchall() if str(r[0] or "").strip()]
+
     def _ensure_schema_migrations(self) -> None:
         """Add missing columns for old DB files without destructive migrations."""
         assert self._conn
         cur = self._conn.execute("PRAGMA table_info(recordings)")
         cols = {str(r["name"]) for r in cur.fetchall()}
+        if "software_id" not in cols:
+            self._conn.execute(
+                "ALTER TABLE recordings ADD COLUMN software_id TEXT NOT NULL DEFAULT 'default'"
+            )
+        if "machine_id" not in cols:
+            self._conn.execute(
+                "ALTER TABLE recordings ADD COLUMN machine_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "station_name" not in cols:
+            self._conn.execute(
+                "ALTER TABLE recordings ADD COLUMN station_name TEXT NOT NULL DEFAULT ''"
+            )
+        if "record_uid" not in cols:
+            self._conn.execute(
+                "ALTER TABLE recordings ADD COLUMN record_uid TEXT NOT NULL DEFAULT ''"
+            )
         if "duration_seconds" not in cols:
             self._conn.execute(
                 "ALTER TABLE recordings ADD COLUMN duration_seconds REAL NOT NULL DEFAULT 0"
             )
-            self._conn.commit()
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recordings_software_created ON recordings(software_id, created_at)"
+        )
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_recordings_record_uid ON recordings(record_uid) WHERE record_uid <> ''"
+        )
+        self._conn.commit()

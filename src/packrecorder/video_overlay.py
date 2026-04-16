@@ -19,18 +19,19 @@ except ImportError:
     Image = ImageDraw = ImageFont = None  # type: ignore[misc, assignment]
     _HAS_PIL = False
 
-_PAD = 8
-_FONT_SIZE = 20
+_PAD = 12
+_FONT_SIZE = 30
 # Nền sát chiều cao chữ: đệm ngang vừa, dọc tối thiểu
-_BOX_PAD_X = 7
-_BOX_PAD_Y = 3
-_RADIUS = 8
-# Nền nhạt, trong suốt hơn (alpha thấp = nhìn xuyên nền video)
-_FILL_RGBA = (245, 247, 252, 158)
-_OUTLINE_RGBA = (200, 208, 220, 140)
-_TEXT_RGBA = (28, 32, 42, 255)
+_BOX_PAD_X = 11
+_BOX_PAD_Y = 5
+_RADIUS = 12
+# Nền đậm hơn và ít trong suốt để tránh bị chìm vào video.
+_FILL_RGBA = (28, 34, 46, 230)
+_OUTLINE_RGBA = (12, 16, 24, 220)
+_TEXT_RGBA = (242, 246, 252, 255)
 # Hệ số phủ khi không có Pillow (OpenCV)
-_CV2_OVERLAY_ALPHA = 0.42
+_CV2_OVERLAY_ALPHA = 0.68
+_UI_CHIP_SCALE = 0.66
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,9 @@ def _load_font(size: int) -> Any:
     assert ImageFont is not None
     windir = os.environ.get("WINDIR", r"C:\Windows")
     candidates = [
+        Path(windir) / "Fonts" / "seguisb.ttf",
+        Path(windir) / "Fonts" / "arialbd.ttf",
+        Path(windir) / "Fonts" / "tahomabd.ttf",
         Path(windir) / "Fonts" / "segoeui.ttf",
         Path(windir) / "Fonts" / "arial.ttf",
         Path(windir) / "Fonts" / "tahoma.ttf",
@@ -149,6 +153,44 @@ def _build_chip_rgba_for_line(line: str) -> np.ndarray:
     return np.ascontiguousarray(np.asarray(img, dtype=np.uint8))
 
 
+def _build_chip_rgba_for_line_ui(line: str) -> np.ndarray:
+    """Chip cho UI: giữ style nhưng nhỏ hơn để đỡ che preview."""
+    assert Image is not None and ImageDraw is not None
+    tmp = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+    tdraw = ImageDraw.Draw(tmp)
+    font = _load_font(max(12, int(round(_FONT_SIZE * _UI_CHIP_SCALE))))
+    bb = tdraw.textbbox((0, 0), line, font=font)
+    text_w = bb[2] - bb[0]
+    text_h = bb[3] - bb[1]
+    pad_x = max(4, int(round(_BOX_PAD_X * _UI_CHIP_SCALE)))
+    pad_y = max(2, int(round(_BOX_PAD_Y * _UI_CHIP_SCALE)))
+    radius = max(5, int(round(_RADIUS * _UI_CHIP_SCALE)))
+    bw = max(4, text_w + pad_x * 2)
+    bh = max(4, text_h + pad_y * 2)
+    img = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img, "RGBA")
+    x1, y1 = bw - 1, bh - 1
+    if hasattr(draw, "rounded_rectangle"):
+        draw.rounded_rectangle(
+            [0, 0, x1, y1],
+            radius=radius,
+            fill=_FILL_RGBA,
+            outline=_OUTLINE_RGBA,
+            width=1,
+        )
+    else:
+        draw.rectangle(
+            [0, 0, x1, y1],
+            fill=_FILL_RGBA,
+            outline=_OUTLINE_RGBA,
+            width=1,
+        )
+    tx = pad_x - bb[0]
+    ty = pad_y - bb[1]
+    draw.text((tx, ty), line, font=font, fill=_TEXT_RGBA)
+    return np.ascontiguousarray(np.asarray(img, dtype=np.uint8))
+
+
 @lru_cache(maxsize=64)
 def _cached_chip_rgba_by_key(
     order: str, packer: str, wall_iso: str, started_iso: str
@@ -159,11 +201,28 @@ def _cached_chip_rgba_by_key(
     return _build_chip_rgba_for_line(line)
 
 
+@lru_cache(maxsize=64)
+def _cached_chip_rgba_ui_by_key(
+    order: str, packer: str, wall_iso: str, started_iso: str
+) -> np.ndarray:
+    wall_dt = datetime.fromisoformat(wall_iso)
+    started_dt = datetime.fromisoformat(started_iso)
+    line = _single_line_vi(order, packer, wall_dt, started_dt)
+    return _build_chip_rgba_for_line_ui(line)
+
+
 def _chip_rgba_cached(
     order: str, packer: str, wall_now: datetime, started_at: datetime
 ) -> np.ndarray:
     k = _burnin_lru_key(order, packer, wall_now, started_at)
     return _cached_chip_rgba_by_key(k[0], k[1], k[2], k[3])
+
+
+def _chip_rgba_ui_cached(
+    order: str, packer: str, wall_now: datetime, started_at: datetime
+) -> np.ndarray:
+    k = _burnin_lru_key(order, packer, wall_now, started_at)
+    return _cached_chip_rgba_ui_by_key(k[0], k[1], k[2], k[3])
 
 
 def _composite_chip_bgr(bgr: np.ndarray, chip_rgba: np.ndarray, x0: int, y0: int) -> None:
@@ -235,8 +294,8 @@ def _burn_in_cv2(
     out = np.ascontiguousarray(bgr)
     line = _single_line_cv2(order, packer, wall_now, started_at)
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.5
-    thick = 1
+    scale = 0.75
+    thick = 2
     (tw, th), bl = cv2.getTextSize(line, font, scale, thick)
     text_h = th + bl
     box_w = tw + _BOX_PAD_X * 2
@@ -245,7 +304,7 @@ def _burn_in_cv2(
     h, w = out.shape[:2]
     x1 = min(w - 1, x0 + box_w)
     y1 = min(h - 1, y0 + box_h)
-    fill_bgr = np.array([245, 247, 252], dtype=np.float32)
+    fill_bgr = np.array([42, 36, 28], dtype=np.float32)
     roi = out[y0:y1, x0:x1].astype(np.float32)
     mask3 = np.zeros((y1 - y0, x1 - x0, 3), dtype=np.uint8)
     _cv2_fill_rounded_rect(mask3, 0, 0, x1 - x0, y1 - y0, (255, 255, 255), _RADIUS)
@@ -255,7 +314,7 @@ def _burn_in_cv2(
     out[y0:y1, x0:x1] = np.clip(roi, 0, 255).astype(np.uint8)
     tx = x0 + _BOX_PAD_X
     ty = y0 + _BOX_PAD_Y + th
-    cv2.putText(out, line, (tx, ty), font, scale, (32, 30, 28), thick, cv2.LINE_AA)
+    cv2.putText(out, line, (tx, ty), font, scale, (240, 244, 248), thick, cv2.LINE_AA)
     return out
 
 
@@ -287,7 +346,7 @@ def render_recording_overlay_chip_rgba(
     """
     if not _HAS_PIL or Image is None:
         return None
-    return _chip_rgba_cached(order, packer, wall_now, started_at).copy()
+    return _chip_rgba_ui_cached(order, packer, wall_now, started_at).copy()
 
 
 def burn_in_recording_info_bgr(

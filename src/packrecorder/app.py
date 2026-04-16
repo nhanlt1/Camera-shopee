@@ -11,6 +11,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QMainWindow
 
+from packrecorder.branding import first_existing_logo_path, load_application_qicon
 from packrecorder.config import default_config_path, load_config
 from packrecorder.shm_cleanup import cleanup_stale_packrecorder_shm
 from packrecorder.session_log import (
@@ -66,6 +67,20 @@ def _ensure_qt_plugins_frozen() -> None:
         _debug_log("frozen: CANH BAO thieu PySide6/plugins — exe co the tat ngay sau khi chay")
 
 
+def _windows_set_app_user_model_id() -> None:
+    """Gắn AppUserModelID — Windows thường cần để taskbar/thumbnail không dùng icon «ứng dụng chung»."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        # Định dạng chuỗi theo gợi ý của Microsoft (tối đa 128 ký tự).
+        app_id = "PackRecorder.PackRecorder.Application.1"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
+
+
 def _apply_readable_app_font(app: QApplication) -> None:
     """Font hệ thống rõ ràng — tránh chữ 'mất' khi QSS/Fusion không gán palette đúng."""
     f = QFont("Segoe UI", 9)
@@ -114,6 +129,11 @@ def run_app() -> int:
     _ensure_qt_plugins_frozen()
     mark_session_phase("Chuẩn bị frozen Qt plugins (nếu có).")
     _debug_log("run_app: bat dau")
+    if getattr(sys, "frozen", False):
+        _debug_log(
+            "frozen: _MEIPASS="
+            f"{getattr(sys, '_MEIPASS', None)!r} logo_path={first_existing_logo_path()!r}"
+        )
     log_err = session_log_path().resolve()
     print(
         f"{stderr_timing_prefix()}PackRecorder: đang mở cửa sổ… "
@@ -127,9 +147,13 @@ def run_app() -> int:
         file=sys.stderr,
     )
     load_config(default_config_path())
+    _windows_set_app_user_model_id()
     t_qt = time.monotonic()
     app = QApplication(sys.argv)
     app.setApplicationName("PackRecorder")
+    _app_icon = load_application_qicon()
+    if _app_icon is not None:
+        app.setWindowIcon(_app_icon)
     app.setStyle("Fusion")
     _apply_readable_app_font(app)
     qss = Path(__file__).resolve().parent / "ui" / "styles.qss"
@@ -156,6 +180,11 @@ def run_app() -> int:
     app.setQuitOnLastWindowClosed(not tray_works)
     _center_on_screen(app, w)
     w.show()
+    # Windows: đôi khi icon titlebar/taskbar chỉ ổn định sau show — gán lại một lần.
+    _icon2 = load_application_qicon()
+    if _icon2 is not None:
+        app.setWindowIcon(_icon2)
+        w.setWindowIcon(_icon2)
     # Luôn đưa cửa sổ lên trước (kể cả khi sẽ thu khay sau vài giây — tránh cảm giác «mở app không thấy gì»).
     w.raise_()
     w.activateWindow()
