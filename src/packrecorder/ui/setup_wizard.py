@@ -23,7 +23,12 @@ from PySide6.QtWidgets import (
 from packrecorder.camera_probe import probe_opencv_camera_indices
 from packrecorder.config import AppConfig, ensure_dual_stations, normalize_config
 from packrecorder.serial_ports import list_filtered_serial_ports
-from packrecorder.ui.dual_station_widget import DualStationWidget, _merge_probe_with_config
+from packrecorder.ui.dual_station_widget import (
+    DualStationWidget,
+    RTSP_DEFAULT_URL_BY_COLUMN,
+    _merge_probe_with_config,
+)
+from packrecorder.ui.setup_wizard_camera import apply_wizard_camera_station
 from packrecorder.ui.hid_pos_setup_wizard import HidPosSetupWizard
 from packrecorder.ui.setup_wizard_scanner import (
     apply_scanner_choice_camera_decode,
@@ -71,11 +76,44 @@ class WizardCameraPage(QWizardPage):
         super().__init__(parent)
         self._col = col
         self.setTitle(f"Máy {col + 1} — Camera")
+        self._radio_usb = QRadioButton("USB webcam")
+        self._radio_rtsp = QRadioButton("Camera IP (RTSP) — nâng cao")
+        self._cam_kind = QButtonGroup(self)
+        self._cam_kind.addButton(self._radio_usb, 0)
+        self._cam_kind.addButton(self._radio_rtsp, 1)
+        self._cam_kind.idClicked.connect(self._on_cam_kind_clicked)
+
         self._combo = QComboBox()
-        form = QFormLayout()
-        form.addRow("Camera ghi (USB index):", self._combo)
+        usb_form = QFormLayout()
+        usb_form.addRow("Camera ghi (USB index):", self._combo)
+        w_usb = QWidget()
+        w_usb.setLayout(usb_form)
+
+        self._rtsp_url = QLineEdit()
+        self._rtsp_url.setPlaceholderText(RTSP_DEFAULT_URL_BY_COLUMN[col])
+        rtsp_form = QFormLayout()
+        rtsp_form.addRow("URL RTSP:", self._rtsp_url)
+        w_rtsp = QWidget()
+        w_rtsp.setLayout(rtsp_form)
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(w_usb)
+        self._stack.addWidget(w_rtsp)
+
+        hint = QLabel(
+            "RTSP: cần mạng ổn định; có thể chỉnh sau trong Cài đặt hoặc màn Quầy."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#555;font-size:12px;")
+
         outer = QVBoxLayout(self)
-        outer.addLayout(form)
+        outer.addWidget(self._radio_usb)
+        outer.addWidget(self._radio_rtsp)
+        outer.addWidget(self._stack)
+        outer.addWidget(hint)
+
+    def _on_cam_kind_clicked(self, _bid: int) -> None:
+        self._stack.setCurrentIndex(1 if self._radio_rtsp.isChecked() else 0)
 
     def initializePage(self) -> None:
         wiz = self.wizard()
@@ -87,26 +125,46 @@ class WizardCameraPage(QWizardPage):
         for i in indices:
             self._combo.addItem(f"Camera {i}", i)
         st = cfg.stations[self._col]
-        want = int(st.record_camera_index) if st.record_camera_kind == "usb" else 0
-        idx = self._combo.findData(want)
-        if idx >= 0:
-            self._combo.setCurrentIndex(idx)
-        elif self._combo.count() > 0:
-            self._combo.setCurrentIndex(0)
+        is_rtsp = st.record_camera_kind == "rtsp" and (st.record_rtsp_url or "").strip()
+        if is_rtsp:
+            self._radio_rtsp.setChecked(True)
+            self._rtsp_url.setText((st.record_rtsp_url or "").strip())
+            self._stack.setCurrentIndex(1)
+        else:
+            self._radio_usb.setChecked(True)
+            self._stack.setCurrentIndex(0)
+            want = int(st.record_camera_index) if st.record_camera_kind == "usb" else 0
+            idx = self._combo.findData(want)
+            if idx >= 0:
+                self._combo.setCurrentIndex(idx)
+            elif self._combo.count() > 0:
+                self._combo.setCurrentIndex(0)
 
     def validatePage(self) -> bool:
         wiz = self.wizard()
         assert isinstance(wiz, SetupWizard)
-        rd = self._combo.currentData()
-        rec = int(rd) if rd is not None else 0
         st = wiz._cfg.stations[self._col]
-        wiz._cfg.stations[self._col] = replace(
-            st,
-            record_camera_index=rec,
-            decode_camera_index=rec,
-            record_camera_kind="usb",
-            record_rtsp_url="",
-        )
+        if self._radio_usb.isChecked():
+            rd = self._combo.currentData()
+            rec = int(rd) if rd is not None else 0
+            wiz._cfg.stations[self._col] = apply_wizard_camera_station(
+                st, self._col, use_usb=True, usb_index=rec, rtsp_url=""
+            )
+            return True
+        url = self._rtsp_url.text().strip()
+        if not url:
+            QMessageBox.warning(
+                self,
+                "RTSP",
+                "Nhập URL RTSP hoặc chọn USB webcam.",
+            )
+            return False
+        try:
+            wiz._cfg.stations[self._col] = apply_wizard_camera_station(
+                st, self._col, use_usb=False, usb_index=0, rtsp_url=url
+            )
+        except ValueError:
+            return False
         return True
 
 
