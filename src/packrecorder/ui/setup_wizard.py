@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from packrecorder.camera_probe import probe_opencv_camera_indices
+from packrecorder.opencv_video import open_rtsp_capture
 from packrecorder.config import AppConfig, ensure_dual_stations, normalize_config
 from packrecorder.serial_ports import list_filtered_serial_ports
 from packrecorder.ui.dual_station_widget import (
@@ -30,6 +31,7 @@ from packrecorder.ui.dual_station_widget import (
     _merge_probe_with_config,
 )
 from packrecorder.ui.setup_wizard_camera import apply_wizard_camera_station
+from packrecorder.ui.setup_wizard_probe import validate_rtsp_probe_result
 from packrecorder.ui.hid_pos_setup_wizard import HidPosSetupWizard
 from packrecorder.ui.setup_wizard_scanner import (
     apply_scanner_choice_camera_decode,
@@ -102,8 +104,12 @@ class WizardCameraPage(QWizardPage):
         self._rtsp_url.setPlaceholderText(RTSP_DEFAULT_URL_BY_COLUMN[col])
         btn_rtsp_hint = QPushButton("Hướng dẫn kết nối RTSP…")
         btn_rtsp_hint.clicked.connect(self._on_rtsp_connection_hint)
+        btn_rtsp_test = QPushButton("Thử kết nối RTSP")
+        btn_rtsp_test.setToolTip("Mở RTSP ngắn để kiểm tra URL có phản hồi khung hình hay không.")
+        btn_rtsp_test.clicked.connect(self._on_test_rtsp_connection)
         rtsp_form = QFormLayout()
         rtsp_form.addRow("URL RTSP:", self._rtsp_url)
+        rtsp_form.addRow(btn_rtsp_test)
         rtsp_form.addRow(btn_rtsp_hint)
         w_rtsp = QWidget()
         w_rtsp.setLayout(rtsp_form)
@@ -166,6 +172,32 @@ class WizardCameraPage(QWizardPage):
             "Sau khi hoàn tất Wizard, trên màn Quầy hãy chọn «RTSP (IP)», "
             "nhập URL và bấm «Kết nối RTSP». Có thể chỉnh thêm trong Cài đặt hoặc file cấu hình.",
         )
+
+    def _on_test_rtsp_connection(self) -> None:
+        url = self._rtsp_url.text().strip()
+        if not url:
+            QMessageBox.warning(
+                self,
+                "RTSP",
+                "Nhập URL RTSP trước khi thử kết nối.",
+            )
+            return
+        cap = open_rtsp_capture(url)
+        try:
+            opened = bool(cap.isOpened())
+            ok_read, frame = cap.read() if opened else (False, None)
+            h = int(frame.shape[0]) if ok_read and frame is not None else 0
+            w = int(frame.shape[1]) if ok_read and frame is not None else 0
+            ok, msg = validate_rtsp_probe_result(opened and ok_read, w, h)
+        finally:
+            try:
+                cap.release()
+            except Exception:
+                pass
+        if ok:
+            QMessageBox.information(self, "RTSP", msg)
+        else:
+            QMessageBox.warning(self, "RTSP", msg)
 
     def initializePage(self) -> None:
         wiz = self.wizard()
