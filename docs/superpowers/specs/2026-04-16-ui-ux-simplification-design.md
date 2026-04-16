@@ -42,10 +42,8 @@ Thứ tự từ trên xuống (đại khái):
 3. **Preview camera** với ROI kéo thả (`RoiPreviewLabel`).
 4. **Khối cấu hình thiết bị** (nhiều control):
    - **Tên máy** (nhãn + ô).
-   - **Nguồn ghi:** radio **USB (webcam)** / **RTSP (IP)**.
-   - **Camera ghi:** combo chỉ số camera hoặc ô URL RTSP + nút kết nối.
-   - **Loại đầu vào máy quét:** combo (COM / camera decode / HID… — tùy build).
-   - **COM / HID:** combo cổng, gợi ý VID:PID, hàng cấu hình HID, nhãn «máy quét đã chọn».
+   - **Nguồn ghi + camera ghi:** radio **USB (webcam)** / **RTSP (IP)**; cùng cụm: combo chỉ số camera **hoặc** ô URL RTSP + nút **Kết nối** (tùy lựa chọn USB/RTSP).
+   - **Loại đầu vào máy quét:** combo (**mặc định COM**; các lựa chọn khác: camera decode / HID… — tùy build). **COM / HID:** combo cổng, gợi ý VID:PID, hàng cấu hình HID, nhãn «máy quét đã chọn».
    - Nút **Làm mới thiết bị** (cục bộ + header cũng có).
 
 **Chế độ xem phim (cinema):** khi cửa sổ ở trạng thái **FullScreen**, `set_cinema_mode(True)` — preview lớn hơn, **ẩn menu bar**; form cột vẫn tồn tại nhưng layout thay đổi kích thước tối thiểu preview.
