@@ -38,10 +38,9 @@ Nguồn tham chiếu: `docs/architecture-and-flow.md`, `src/packrecorder/ui/main
 Thứ tự từ trên xuống (đại khái):
 
 1. **Banner** cảnh báo / trạng thái ghi (ẩn khi không dùng).
-2. **Thời lượng ghi** (ẩn khi không ghi).
-3. **Hàng mã đơn:** nhãn «Mã đơn:», ô nhập, nút **Bắt đầu ghi** (nhập tay / Enter).
-4. **Preview camera** với ROI kéo thả (`RoiPreviewLabel`).
-5. **Khối cấu hình thiết bị** (nhiều control):
+2. **Thời lượng ghi** (ẩn khi không ghi) **và** **hàng mã đơn** trên cùng một dòng khu vực: nhãn «Mã đơn:», ô nhập, nút **Bắt đầu ghi** (nhập tay / Enter).
+3. **Preview camera** với ROI kéo thả (`RoiPreviewLabel`).
+4. **Khối cấu hình thiết bị** (nhiều control):
    - **Tên máy** (nhãn + ô).
    - **Nguồn ghi:** radio **USB (webcam)** / **RTSP (IP)**.
    - **Camera ghi:** combo chỉ số camera hoặc ô URL RTSP + nút kết nối.
