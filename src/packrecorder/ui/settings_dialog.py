@@ -248,6 +248,28 @@ class SettingsDialog(QDialog):
         tf.addRow("Bíp «còn sống» mỗi (phút), 0 = tắt", self._health_interval)
         tf.addRow("Âm lượng bíp (0–1)", self._health_vol)
 
+        mini_box = QGroupBox("Mini-Overlay (hai quầy khi thu nhỏ / ẩn cửa sổ)")
+        mini_box.setToolTip(
+            "Khung trạng thái nhỏ góc màn hình khi cửa sổ chính không hiện — không dừng ghi."
+        )
+        mf = QFormLayout(mini_box)
+        self._mini_overlay_on = QCheckBox("Bật overlay hai quầy khi thu nhỏ / ẩn cửa sổ")
+        self._mini_overlay_on.setChecked(cfg.mini_overlay_enabled)
+        self._mini_ct = QCheckBox("Click-through — chuột đi xuyên qua overlay")
+        self._mini_ct.setChecked(cfg.mini_overlay_click_through)
+        self._mini_ct.setToolTip(
+            "Bật thì không bấm được lên khung overlay; dùng khi cần thao tác app phía sau."
+        )
+        self._mini_ct.clicked.connect(self._on_mini_overlay_click_through_clicked)
+        _mini_warn = QLabel(
+            "Click-through: không tương tác được với overlay — chỉ bật khi thật sự cần."
+        )
+        _mini_warn.setWordWrap(True)
+        _mini_warn.setStyleSheet("color:#555;font-size:smaller;")
+        mf.addRow(self._mini_overlay_on)
+        mf.addRow(self._mini_ct)
+        mf.addRow(_mini_warn)
+
         _repo_root = Path(__file__).resolve().parents[3]
         winson_box = QGroupBox("Máy quét Winson — mã cấu hình (quét vào thiết bị)")
         winson_layout = QVBoxLayout(winson_box)
@@ -319,6 +341,7 @@ class SettingsDialog(QDialog):
         scroll_layout.addWidget(vid_box)
         scroll_layout.addWidget(ha_box)
         scroll_layout.addWidget(winson_box)
+        scroll_layout.addWidget(mini_box)
         scroll_layout.addWidget(tray_box)
 
         scroll = QScrollArea()
@@ -418,6 +441,16 @@ class SettingsDialog(QDialog):
         self._winson_str.setText(
             "Quét mã sau bằng máy Winson, rồi «Làm mới thiết bị» trên quầy:\n"
             f"{self._winson_codes[idx]}"
+        )
+
+    def _on_mini_overlay_click_through_clicked(self) -> None:
+        if not self._mini_ct.isChecked():
+            return
+        QMessageBox.information(
+            self,
+            "Click-through",
+            "Khi bật, chuột đi xuyên qua overlay — bạn không bấm được lên khung trạng thái hai quầy. "
+            "Chỉ bật khi cần thao tác cửa sổ phía sau.",
         )
 
     def _emit_test_notification(self) -> None:
@@ -667,6 +700,8 @@ class SettingsDialog(QDialog):
             tray_show_toast_on_order=self._tray_toast.isChecked(),
             tray_health_beep_interval_min=int(self._health_interval.value()),
             tray_health_beep_volume=float(self._health_vol.value()),
+            mini_overlay_enabled=self._mini_overlay_on.isChecked(),
+            mini_overlay_click_through=self._mini_ct.isChecked(),
             enable_global_barcode_hook=False,
         )
         if self._mode_pip.isChecked():

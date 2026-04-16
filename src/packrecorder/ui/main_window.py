@@ -98,6 +98,7 @@ from packrecorder.shutdown_scheduler import compute_next_shutdown_at
 from packrecorder.ui.countdown_dialog import ShutdownCountdownDialog
 from packrecorder.ui.dual_station_widget import DualStationWidget
 from packrecorder.ui.mini_status_overlay import MiniStatusOverlay
+from packrecorder.ui.preview_tab_policy import should_paint_quay_preview
 from packrecorder.ui.recording_search_dialog import RecordingSearchPanel
 from packrecorder.ui.settings_dialog import SettingsDialog
 from packrecorder.video_overlay import (
@@ -390,6 +391,10 @@ class MainWindow(QMainWindow):
         self._main_tabs = QTabWidget(self)
         self._main_tabs.addTab(self._counter_page, "Quầy")
         self._main_tabs.addTab(self._search_panel, "Quản lý")
+        self._counter_tab_index = self._main_tabs.indexOf(self._counter_page)
+        self._paint_quay_preview = True
+        self._main_tabs.currentChanged.connect(self._sync_quay_preview_paint_flag)
+        self._sync_quay_preview_paint_flag()
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -769,6 +774,14 @@ class MainWindow(QMainWindow):
         else:
             self._stack.setCurrentWidget(self._mode_hint)
             QTimer.singleShot(0, self._restart_scan_workers)
+        self._sync_quay_preview_paint_flag()
+
+    def _sync_quay_preview_paint_flag(self) -> None:
+        self._paint_quay_preview = should_paint_quay_preview(
+            multi_camera_mode=self._config.multi_camera_mode,
+            main_tab_index=self._main_tabs.currentIndex(),
+            counter_tab_index=self._counter_tab_index,
+        )
 
     def _deferred_stations_scan_and_probe(self) -> None:
         if self._config.multi_camera_mode != "stations":
@@ -1060,6 +1073,8 @@ class MainWindow(QMainWindow):
         self._station_preview_flush_scheduled = False
         pending = self._pending_station_preview
         self._pending_station_preview = {}
+        if not self._paint_quay_preview:
+            return
         if self._config.multi_camera_mode != "stations":
             return
         for cam_idx, (bgr, fw, fh) in pending.items():
@@ -2560,6 +2575,11 @@ class MainWindow(QMainWindow):
                 self._sync_header_video_root_from_config()
                 self._setup_system_tray()
                 self._restart_tray_health_timer()
+                self._mini_overlay.set_click_through(self._config.mini_overlay_click_through)
+                if not self._config.mini_overlay_enabled:
+                    self._mini_overlay.hide()
+                    self._mini_overlay_timer.stop()
+                self._sync_mini_overlay_visibility()
                 qa = QApplication.instance()
                 if qa is not None:
                     tray_ok = self._config.minimize_to_tray and self._tray is not None
