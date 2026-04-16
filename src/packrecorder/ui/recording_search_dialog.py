@@ -357,6 +357,8 @@ class RecordingSearchPanel(QWidget):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
+        # Spec §6.2a: không gọi setFocus() vào ô lọc — tránh máy quét COM gửi ký tự vào filter
+        # khi chuyển tab Quản lý.
         if self._db_ok_for_search:
             self._run_search()
 

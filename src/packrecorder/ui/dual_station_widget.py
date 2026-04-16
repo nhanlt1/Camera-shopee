@@ -795,6 +795,7 @@ class DualStationWidget(QWidget):
             self._emit_debounced()
         self._apply_manual_order_readonly()
         self._refresh_scanner_selected_label(col)
+        self._refresh_preview_roi_lock(col)
 
     def _on_hid_vid_pid_changed(self, col: int) -> None:
         if self._scanner_kind_data(col) != "hid_pos":
@@ -955,6 +956,22 @@ class DualStationWidget(QWidget):
             return bool(port and str(port).strip())
         return False
 
+    def _preview_roi_unlocked_for_column(self, col: int) -> bool:
+        """True = cho phép kéo ROI (đọc mã bằng camera khi không có COM/HID)."""
+        if not (0 <= col < len(self._scanner_input_kind)):
+            return True
+        if self._scanner_kind_data(col) == "hid_pos":
+            return False
+        port = str(self._scanner[col].currentData() or "").strip()
+        return not bool(port)
+
+    def _refresh_preview_roi_lock(self, col: int) -> None:
+        if not (0 <= col < len(self._preview)):
+            return
+        self._preview[col].set_roi_locked(
+            not self._preview_roi_unlocked_for_column(col)
+        )
+
     def _on_scanner_or_decode_changed(self, col: int, emit: bool = True) -> None:
         port = self._scanner[col].currentData()
         use_serial = bool(port and str(port).strip())
@@ -973,6 +990,7 @@ class DualStationWidget(QWidget):
                     self._on_scanner_or_decode_changed(oc, emit=False)
         self._apply_manual_order_readonly()
         self._refresh_scanner_selected_label(col)
+        self._refresh_preview_roi_lock(col)
 
     def _refresh_scanner_selected_label(self, col: int) -> None:
         if not (0 <= col < len(self._scanner_selected_label)):
@@ -1136,6 +1154,8 @@ class DualStationWidget(QWidget):
                 )
             self._apply_manual_order_readonly()
         self._refresh_layout_mode()
+        for col in range(min(2, len(cfg.stations))):
+            self._refresh_preview_roi_lock(col)
 
     def duplicate_scanner_ports(self) -> bool:
         def key(col: int) -> tuple[str, str] | None:

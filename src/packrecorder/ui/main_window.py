@@ -98,6 +98,7 @@ from packrecorder.shutdown_scheduler import compute_next_shutdown_at
 from packrecorder.ui.countdown_dialog import ShutdownCountdownDialog
 from packrecorder.ui.dual_station_widget import DualStationWidget
 from packrecorder.ui.mini_status_overlay import MiniStatusOverlay
+from packrecorder.ui.window_title_summary import format_minimized_window_title
 from packrecorder.ui.preview_tab_policy import should_paint_quay_preview
 from packrecorder.ui.recording_search_dialog import RecordingSearchPanel
 from packrecorder.ui.settings_dialog import SettingsDialog
@@ -1144,7 +1145,8 @@ class MainWindow(QMainWindow):
                 f"MP worker camera {cam_idx}:\n{tb_text[:8000]}",
             )
             self._status.showMessage(
-                f"Lỗi worker camera {cam_idx} (chi tiết trong log phiên).",
+                f"Camera {cam_idx} không mở được — kiểm tra USB hoặc app khác đang dùng camera. "
+                f"Tệp → «Thiết lập máy & quầy» nếu cần đổi thiết bị. (Chi tiết trong log phiên.)",
                 30000,
             )
             self._set_tray_icon_error()
@@ -2689,6 +2691,17 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.Type.WindowStateChange:
             self._sync_dual_cinema_mode()
             self._sync_mini_overlay_visibility()
+            st = self.windowState()
+            if bool(st & Qt.WindowState.WindowMinimized) and (
+                self._config.multi_camera_mode == "stations"
+            ):
+                try:
+                    a, b = self._mini_overlay_line_pair()
+                    self.setWindowTitle(format_minimized_window_title(a, b))
+                except Exception:
+                    self.setWindowTitle("Pack Recorder")
+            elif not bool(st & Qt.WindowState.WindowMinimized):
+                self.setWindowTitle("Pack Recorder")
         super().changeEvent(event)
 
     def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802

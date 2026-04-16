@@ -6,13 +6,16 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
+    QDialog,
     QFormLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QStackedWidget,
     QVBoxLayout,
+    QWidget,
     QWizard,
     QWizardPage,
 )
@@ -21,6 +24,12 @@ from packrecorder.camera_probe import probe_opencv_camera_indices
 from packrecorder.config import AppConfig, ensure_dual_stations, normalize_config
 from packrecorder.serial_ports import list_filtered_serial_ports
 from packrecorder.ui.dual_station_widget import DualStationWidget, _merge_probe_with_config
+from packrecorder.ui.hid_pos_setup_wizard import HidPosSetupWizard
+from packrecorder.ui.setup_wizard_scanner import (
+    apply_scanner_choice_camera_decode,
+    apply_scanner_choice_com,
+    apply_scanner_choice_hid,
+)
 from packrecorder.ui.winson_com_qr_panel import WinsonComQrPanel
 
 
@@ -105,22 +114,114 @@ class WizardScannerPage(QWizardPage):
     def __init__(self, col: int, parent: QWizard) -> None:
         super().__init__(parent)
         self._col = col
-        self.setTitle(f"Máy {col + 1} — Máy quét (COM)")
+        self.setTitle(f"Máy {col + 1} — Máy quét")
+        self._hid_vid: str | None = None
+        self._hid_pid: str | None = None
+
+        self._radio_com = QRadioButton("USB COM (khuyến nghị — pyserial)")
+        self._radio_hid = QRadioButton("HID POS (đọc raw — VID/PID)")
+        self._radio_cam = QRadioButton("Đọc mã bằng camera (không COM/HID)")
+        self._mode_grp = QButtonGroup(self)
+        self._mode_grp.addButton(self._radio_com, 0)
+        self._mode_grp.addButton(self._radio_hid, 1)
+        self._mode_grp.addButton(self._radio_cam, 2)
+        self._mode_grp.idClicked.connect(self._on_mode_id)
+
         self._combo = QComboBox()
         self._combo.setMinimumWidth(320)
-        btn = QPushButton("Làm mới thiết bị")
-        btn.clicked.connect(self._refresh_ports)
+        btn_refresh = QPushButton("Làm mới thiết bị")
+        btn_refresh.clicked.connect(self._refresh_ports)
         self._qr = WinsonComQrPanel(_repo_root(), self)
         self._qr.set_on_refresh(self._refresh_ports)
-        form = QFormLayout()
-        form.addRow("Cổng COM:", self._combo)
-        form.addRow(btn)
+        com_form = QFormLayout()
+        com_form.addRow("Cổng COM:", self._combo)
+        com_form.addRow(btn_refresh)
+        w_com = QWidget()
+        w_com_l = QVBoxLayout(w_com)
+        w_com_l.addLayout(com_form)
+        w_com_l.addWidget(self._qr)
+
+        btn_hid = QPushButton("Mở thiết lập HID POS…")
+        btn_hid.clicked.connect(self._run_hid_wizard)
+        self._lbl_hid_status = QLabel("Chưa chọn thiết bị HID.")
+        self._lbl_hid_status.setWordWrap(True)
+        w_hid = QWidget()
+        w_hid_l = QVBoxLayout(w_hid)
+        w_hid_l.addWidget(btn_hid)
+        w_hid_l.addWidget(self._lbl_hid_status)
+
+        w_cam = QWidget()
+        w_cam_l = QVBoxLayout(w_cam)
+        w_cam_l.addWidget(
+            QLabel(
+                "Mã vạch được đọc từ camera ghi (pyzbar). "
+                "Chỉnh vùng ROI trên màn Quầy sau khi hoàn tất thiết lập."
+            )
+        )
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(w_com)
+        self._stack.addWidget(w_hid)
+        self._stack.addWidget(w_cam)
+
         outer = QVBoxLayout(self)
-        outer.addLayout(form)
-        outer.addWidget(self._qr)
+        outer.addWidget(self._radio_com)
+        outer.addWidget(self._radio_hid)
+        outer.addWidget(self._radio_cam)
+        outer.addWidget(self._stack)
+
+    def _on_mode_id(self, bid: int) -> None:
+        self._stack.setCurrentIndex(bid)
+        if bid == 0:
+            self._refresh_ports()
+
+    def _run_hid_wizard(self) -> None:
+        wiz = HidPosSetupWizard(self)
+        chosen_vid: list[str] = []
+        chosen_pid: list[str] = []
+
+        def on_vid_pid(v: int, p: int) -> None:
+            chosen_vid[:] = [f"{v:04X}"]
+            chosen_pid[:] = [f"{p:04X}"]
+
+        wiz.vid_pid_chosen.connect(on_vid_pid)
+        if wiz.exec() == QDialog.DialogCode.Accepted and chosen_vid and chosen_pid:
+            self._hid_vid = chosen_vid[0]
+            self._hid_pid = chosen_pid[0]
+            self._lbl_hid_status.setText(
+                f"Đã chọn VID {self._hid_vid} / PID {self._hid_pid}"
+            )
 
     def initializePage(self) -> None:
-        self._refresh_ports()
+        self._sync_mode_from_cfg()
+
+    def _sync_mode_from_cfg(self) -> None:
+        wiz = self.wizard()
+        assert isinstance(wiz, SetupWizard)
+        st = wiz._cfg.stations[self._col]
+        self._mode_grp.blockSignals(True)
+        try:
+            if st.scanner_input_kind == "hid_pos" and (st.scanner_usb_vid or "").strip():
+                self._radio_hid.setChecked(True)
+                self._hid_vid = (st.scanner_usb_vid or "").strip().upper()
+                self._hid_pid = (st.scanner_usb_pid or "").strip().upper()
+                self._lbl_hid_status.setText(
+                    f"Đã chọn VID {self._hid_vid} / PID {self._hid_pid}"
+                )
+                self._stack.setCurrentIndex(1)
+            elif (st.scanner_serial_port or "").strip():
+                self._radio_com.setChecked(True)
+                self._stack.setCurrentIndex(0)
+                self._refresh_ports()
+            else:
+                self._radio_cam.setChecked(True)
+                self._hid_vid = None
+                self._hid_pid = None
+                self._lbl_hid_status.setText("Chưa chọn thiết bị HID.")
+                self._stack.setCurrentIndex(2)
+                self._refresh_ports()
+        finally:
+            self._mode_grp.blockSignals(False)
 
     def _refresh_ports(self) -> None:
         wiz = self.wizard()
@@ -136,18 +237,36 @@ class WizardScannerPage(QWizardPage):
                 if str(self._combo.itemData(i) or "").strip() == want:
                     self._combo.setCurrentIndex(i)
                     break
-        self._qr.setVisible(len(raw) == 0)
+        on_com = self._stack.currentIndex() == 0
+        self._qr.setVisible(on_com and len(raw) == 0)
 
     def validatePage(self) -> bool:
         wiz = self.wizard()
         assert isinstance(wiz, SetupWizard)
-        port = str(self._combo.currentData() or "").strip()
         st = wiz._cfg.stations[self._col]
-        wiz._cfg.stations[self._col] = replace(
-            st,
-            scanner_serial_port=port,
-            scanner_input_kind="com",
-        )
+        if self._radio_com.isChecked():
+            port = str(self._combo.currentData() or "").strip()
+            if not port:
+                QMessageBox.warning(
+                    self,
+                    "Cổng COM",
+                    "Chọn cổng COM hoặc chọn «Đọc mã bằng camera».",
+                )
+                return False
+            wiz._cfg.stations[self._col] = apply_scanner_choice_com(st, port=port)
+        elif self._radio_hid.isChecked():
+            if not self._hid_vid or not self._hid_pid:
+                QMessageBox.warning(
+                    self,
+                    "HID",
+                    "Bấm «Mở thiết lập HID POS…» và hoàn tất chọn thiết bị.",
+                )
+                return False
+            wiz._cfg.stations[self._col] = apply_scanner_choice_hid(
+                st, vid=self._hid_vid, pid=self._hid_pid
+            )
+        else:
+            wiz._cfg.stations[self._col] = apply_scanner_choice_camera_decode(st)
         return True
 
 
