@@ -29,7 +29,7 @@ Nguồn tham chiếu: `docs/architecture-and-flow.md`, `src/packrecorder/ui/main
 | **Khu vực trung tâm** | `QStackedWidget`: trang **hai quầy** (`DualStationWidget`) *hoặc* nhãn hướng dẫn khi chế độ camera không phải «Đa quầy». |
 | **Status bar** | Chip trạng thái đơn («Chờ quét mã đơn» / tương đương khi ghi), thanh thời gian ghi (khi có), chỉ báo đồng bộ / heartbeat (tuỳ cấu hình). |
 | **Menu** | **Tệp** → Cài đặt, Mở thư mục nhật ký phiên; mục **Tìm kiếm video đã ghi**. |
-| **Khay hệ thống** | Tuỳ chọn: thu vào khay, khởi động ẩn trong khay (sau ~2,8s), toast khi có đơn (tuỳ chọn). |
+| **Khay hệ thống** | Tuỳ chọn: thu vào khay, khởi động ẩn trong khay (sau ~2,8s), toast khi có đơn (tuỳ chọn). **Hiện tại** chưa bắt buộc hiển thị đủ **hai dòng** Máy 1 / Máy 2 + trạng thái đơn khi ẩn — xem **6.2b** (yêu cầu mới). |
 
 ### 2.2. Mỗi cột quầy (`DualStationWidget` — `QGroupBox` «Máy 1» / «Máy 2»)
 
@@ -135,6 +135,29 @@ Bổ sung vào `AppConfig` (tên field có thể tinh chỉnh khi implement):
   - **Không** hiện combo COM/RTSP trừ khi mở khóa Setup.
 - Nút **«Mở cài đặt»** hoặc tổ hợp phím (ví dụ Ctrl+Shift+,) — có thể yêu cầu mật khẩu đơn giản nếu nghiệp vụ cần (tùy chọn, không bắt buộc MVP).
 
+### 6.2b. Trạng thái Máy 1 / Máy 2 khi cửa sổ minimize hoặc ẩn hoàn toàn
+
+**Yêu cầu bắt buộc:** khi người dùng **thu nhỏ xuống taskbar** (`showMinimized` / cửa sổ không hiện nhưng process còn) **hoặc** **ẩn hoàn toàn** (chỉ còn icon **khay hệ thống**, `hide()` + chế độ chạy nền / `start_in_tray`), phần mềm vẫn phải cho thấy **đúng hai dòng** thông tin tương ứng **hai quầy** (đa quầy), mỗi dòng gồm nhãn quầy và **trạng thái đơn hiện tại**:
+
+| Dòng | Nội dung tối thiểu |
+|------|---------------------|
+| **1** | **Máy 1** — tên quầy (theo cấu hình, ví dụ «Quầy A») — **idle** hoặc **đang quay** kèm **mã đơn** đang ghi (nếu có). |
+| **2** | **Máy 2** — cùng cấu trúc cho quầy thứ hai. |
+
+**Trạng thái chữ:** dùng ngôn ngữ ngắn gọn nhất quán toàn app, ví dụ: «Chờ quét» / «Đang ghi: `ORDER123`» (hoặc tương đương đã dùng trên status bar / chip).
+
+**Phạm vi chế độ:** áp dụng rõ ràng cho **`multi_camera_mode = stations`**. Nếu chỉ một quầy hoạt động, dòng còn lại có thể hiển thị «Máy 2: (không dùng)» hoặc «—» theo quy ước implement (ghi rõ trong release note).
+
+**Cách hiển thị (ưu tiên triển khai — chọn một hoặc kết hợp, miễn đạt yêu cầu đọc được hai dòng):**
+
+1. **Tooltip của icon khay** (`QSystemTrayIcon::setToolTip`) — chuỗi nhiều dòng (`\n`), cập nhật mỗi khi đổi trạng thái ghi / mã đơn. Lưu ý Windows có thể **giới hạn độ dài** tooltip; nếu cắt chữ, dùng thêm phương án 2 hoặc 3.
+2. **Menu ngữ cảnh của icon khay** — hai mục chỉ đọc (non-click) hoặc phần header luôn hiển thị 2 dòng trạng thái trước các lệnh «Hiện cửa sổ» / «Thoát».
+3. **Cửa sổ phụ tối giản** (optional): thanh trạng thái nhỏ `always on top`, chỉ vài chục pixel cao, hiện 2 dòng — bật khi bật «chạy nền» và tooltip không đủ; có tắt trong Cài đặt nếu gây che màn.
+
+**Taskbar (cửa sổ minimize nhưng không vào khay):** cập nhật **tiêu đề cửa sổ** hoặc mô tả nút taskbar (một dòng tóm tắt nếu API chỉ cho một dòng: ví dụ `Máy1: ghi ORDER1 | Máy2: chờ`) — ưu tiên vẫn là người dùng **hover** vào icon khay hoặc mở menu khay để thấy đủ hai dòng như bảng trên.
+
+**Đồng bộ:** nguồn sự thật vẫn là `OrderStateMachine` / trạng thái ghi từng `station_id` — UI ẩn chỉ **phản chiếu**, không tách logic nghiệp vụ.
+
 ### 6.3. Màn hình Setup (lần đầu / khi admin sửa)
 
 Luồng cố định khớp yêu cầu:
@@ -179,6 +202,7 @@ Tài liệu và file QR mẫu: mục **7.6** và thư mục `docs/scanner-config
 
 - Người chưa dùng bao giờ hoàn thành Setup ≤ 3 phút với 1 camera + 1 máy quét USB-COM.
 - Sau reboot mô phỏng: app mở full screen, quét mã bắt đầu ghi trong dưới 5 giây mà không cần chạm cài đặt.
+- Khi minimize hoặc chỉ còn icon khay: luôn đọc được **hai dòng** Máy 1 / Máy 2 và trạng thái đơn (idle / đang quay + mã) — **6.2b**.
 - Không regression: vẫn mở được `SettingsDialog` đầy đủ cho admin.
 
 ---
@@ -238,7 +262,7 @@ class BarcodeScannerWorker(QThread):
 |-----------|-------------------|
 | **IME / Unikey** | Dữ liệu không đi qua pipeline bàn phím → hạn chế lỗi ký tự khi nhân viên đang gõ tiếng Việt ở app khác. |
 | **Non-blocking UX** | Nhân viên có thể dùng chuột, trình duyệt, cửa sổ khác; worker COM vẫn nhận dòng mã. Pack Recorder map mã vào `OrderStateMachine` và ghi video **không phụ thuộc** focus ô «Mã đơn» (đã cấu hình đúng nguồn quầy). |
-| **Chạy ngầm / khay** | Tương thích với tùy chọn **thu vào khay** (`minimize_to_tray`, `start_in_tray`): COM không yêu cầu cửa sổ đang foreground. |
+| **Chạy ngầm / khay** | Tương thích với tùy chọn **thu vào khay** (`minimize_to_tray`, `start_in_tray`): COM không yêu cầu cửa sổ đang foreground. Khi ẩn, người dùng vẫn cần **thấy trạng thái hai quầy** (mục **6.2b**), không chỉ icon trống. |
 
 **Lưu ý:** «Kích hoạt WriterProcess» trong mô tả nghiệp vụ tương ứng với luồng ghi FFmpeg / `encode_writer_worker` trong tài liệu kiến trúc — không đổi tên class trong spec này; khi implement chỉ cần đảm bảo `_on_serial_decoded` → state machine → start/stop ghi vẫn nhất quán.
 
@@ -247,6 +271,7 @@ class BarcodeScannerWorker(QThread):
 - Wizard **Setup** (mục 6.3) nên có bước **«Máy quét COM (khuyến nghị — tránh lỗi IME)»** với hướng dẫn ngắn: quét mã **USB COM** (`881001133.`) trên Winson → chọn `COMx` → baud **115200**. Khi không nhận thiết bị: hiển thị QR/chuỗi (6.3).
 - **Settings — cài đặt máy quét** (mục 6.3a): hiển thị đủ ba mã chế độ (COM / HID / Keyboard) dưới dạng QR để đổi chế độ bất kỳ lúc nào.
 - Màn **Quầy** (mục 6.2) không cần ô nhập focus để nhận mã từ COM; vẫn nên hiển thị chip trạng thái khi COM lỗi (mục 6.5).
+- **Minimize / ẩn hoàn toàn:** bắt buộc phản chiếu Máy 1 + Máy 2 và đơn hiện tại (mục **6.2b**).
 
 ### 7.6. Bảng mã cấu hình chế độ Winson (chuỗi quét + QR)
 
@@ -309,7 +334,7 @@ Xem thêm bảng và hướng dẫn in: [`docs/scanner-config-codes/winson-mode-
 
 - **Giả định:** một máy trạm điển hình dùng 1–2 quầy; không mô tả chi tiết chế độ PIP/single trong màn Quầy (có thể vẫn dùng UI hiện tại cho các chế độ đó).
 - **Rủi ro:** full screen + Esc cần thiết kế cẩn thận để không khóa người dùng; nên giữ taskbar hoặc phím tắt thoát rõ ràng.
-- **Bước tiếp theo sau khi duyệt spec:** lập kế hoạch triển khai theo skill `writing-plans` (chia task: config flags, widget Quầy, wizard Setup + nhánh lỗi máy quét (QR `881001133.`), màn Settings máy quét (ba QR), startup shortcut, QA).
+- **Bước tiếp theo sau khi duyệt spec:** lập kế hoạch triển khai theo skill `writing-plans` (chia task: config flags, widget Quầy, wizard Setup + nhánh lỗi máy quét (QR `881001133.`), màn Settings máy quét (ba QR), **tooltip/menu khay + taskbar title: hai dòng Máy 1/Máy 2** (6.2b), startup shortcut, QA).
 
 ---
 
