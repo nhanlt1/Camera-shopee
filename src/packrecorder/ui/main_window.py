@@ -96,6 +96,7 @@ from packrecorder.hid_pos_scan_worker import HidPosScanWorker
 from packrecorder.serial_scan_worker import SerialScanWorker
 from packrecorder.shutdown_scheduler import compute_next_shutdown_at
 from packrecorder.ui.countdown_dialog import ShutdownCountdownDialog
+from packrecorder.ui.camera_error_messages import mp_worker_error_dialog_text
 from packrecorder.ui.dual_station_widget import DualStationWidget
 from packrecorder.ui.mini_status_overlay import MiniStatusOverlay
 from packrecorder.ui.window_title_summary import format_minimized_window_title
@@ -235,6 +236,7 @@ class MainWindow(QMainWindow):
         self._workers: dict[int, ScanWorker] = {}
         self._mp_pipelines: dict[int, MpCameraPipeline] = {}
         self._mp_watchdog_last_restart_mono: dict[int, float] = {}
+        self._mp_worker_error_dialog_last_mono: dict[int, float] = {}
         self._mp_preview_last_mono: dict[int, float] = {}
         self._serial_workers: dict[str, SerialScanWorker | HidPosScanWorker] = {}
         self._preview_targets: dict[int, list[int]] = {}
@@ -1150,6 +1152,20 @@ class MainWindow(QMainWindow):
                 30000,
             )
             self._set_tray_icon_error()
+            now = time.monotonic()
+            last = self._mp_worker_error_dialog_last_mono.get(cam_idx, 0.0)
+            if now - last < 45.0:
+                return
+            self._mp_worker_error_dialog_last_mono[cam_idx] = now
+            reply = QMessageBox.question(
+                self,
+                "Camera không mở được",
+                mp_worker_error_dialog_text(cam_idx),
+                QMessageBox.StandardButton.Retry | QMessageBox.StandardButton.Close,
+                QMessageBox.StandardButton.Close,
+            )
+            if reply == QMessageBox.StandardButton.Retry:
+                QTimer.singleShot(0, self._restart_scan_workers)
         except Exception:
             log_session_error(
                 "Lỗi trong _on_mp_worker_error.",
