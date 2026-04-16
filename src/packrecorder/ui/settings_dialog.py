@@ -324,12 +324,15 @@ class SettingsDialog(QDialog):
         winson_layout.addWidget(self._winson_r_kb)
         self._winson_pix = QLabel()
         self._winson_pix.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._winson_bc_pix = QLabel()
+        self._winson_bc_pix.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._winson_str = QLabel()
         self._winson_str.setWordWrap(True)
         self._winson_str.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         winson_layout.addWidget(self._winson_pix)
+        winson_layout.addWidget(self._winson_bc_pix)
         winson_layout.addWidget(self._winson_str)
         self._winson_paths = (
             _repo_root
@@ -347,6 +350,23 @@ class SettingsDialog(QDialog):
             / "scanner-config-codes"
             / "winson-mode-barcodes"
             / "qr-usb-keyboard.png",
+        )
+        self._winson_barcode_paths = (
+            _repo_root
+            / "docs"
+            / "scanner-config-codes"
+            / "winson-mode-barcodes"
+            / "code128-usb-com.png",
+            _repo_root
+            / "docs"
+            / "scanner-config-codes"
+            / "winson-mode-barcodes"
+            / "code128-usb-hid.png",
+            _repo_root
+            / "docs"
+            / "scanner-config-codes"
+            / "winson-mode-barcodes"
+            / "code128-usb-keyboard.png",
         )
         self._winson_codes = (
             WINSON_MODE_USB_COM,
@@ -497,6 +517,19 @@ class SettingsDialog(QDialog):
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
+        bc_path = self._winson_barcode_paths[idx]
+        bc_pix = QPixmap(str(bc_path))
+        if not bc_pix.isNull():
+            self._winson_bc_pix.setPixmap(
+                bc_pix.scaledToWidth(
+                    280,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            self._winson_bc_pix.setVisible(True)
+        else:
+            self._winson_bc_pix.clear()
+            self._winson_bc_pix.setVisible(False)
         self._winson_str.setText(
             "Quét mã sau bằng máy Winson, rồi «Làm mới thiết bị» trên quầy:\n"
             f"{self._winson_codes[idx]}"

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -84,15 +85,26 @@ class WizardCameraPage(QWizardPage):
         self._cam_kind.idClicked.connect(self._on_cam_kind_clicked)
 
         self._combo = QComboBox()
+        usb_row = QHBoxLayout()
+        usb_row.addWidget(self._combo, 1)
+        btn_usb_refresh = QPushButton("Làm mới danh sách camera")
+        btn_usb_refresh.setToolTip("Quét lại webcam đã cắm (tương tự màn Quầy).")
+        btn_usb_refresh.clicked.connect(self._on_usb_refresh_cameras)
+        usb_row.addWidget(btn_usb_refresh)
         usb_form = QFormLayout()
-        usb_form.addRow("Camera ghi (USB index):", self._combo)
+        usb_row_w = QWidget()
+        usb_row_w.setLayout(usb_row)
+        usb_form.addRow("Camera ghi (USB index):", usb_row_w)
         w_usb = QWidget()
         w_usb.setLayout(usb_form)
 
         self._rtsp_url = QLineEdit()
         self._rtsp_url.setPlaceholderText(RTSP_DEFAULT_URL_BY_COLUMN[col])
+        btn_rtsp_hint = QPushButton("Hướng dẫn kết nối RTSP…")
+        btn_rtsp_hint.clicked.connect(self._on_rtsp_connection_hint)
         rtsp_form = QFormLayout()
         rtsp_form.addRow("URL RTSP:", self._rtsp_url)
+        rtsp_form.addRow(btn_rtsp_hint)
         w_rtsp = QWidget()
         w_rtsp.setLayout(rtsp_form)
 
@@ -115,7 +127,7 @@ class WizardCameraPage(QWizardPage):
     def _on_cam_kind_clicked(self, _bid: int) -> None:
         self._stack.setCurrentIndex(1 if self._radio_rtsp.isChecked() else 0)
 
-    def initializePage(self) -> None:
+    def _refill_usb_camera_combo(self, preferred_index: int | None) -> None:
         wiz = self.wizard()
         assert isinstance(wiz, SetupWizard)
         cfg = wiz._cfg
@@ -125,20 +137,52 @@ class WizardCameraPage(QWizardPage):
         for i in indices:
             self._combo.addItem(f"Camera {i}", i)
         st = cfg.stations[self._col]
+        want = (
+            int(preferred_index)
+            if preferred_index is not None
+            else (
+                int(st.record_camera_index)
+                if st.record_camera_kind == "usb"
+                else 0
+            )
+        )
+        idx = self._combo.findData(want)
+        if idx >= 0:
+            self._combo.setCurrentIndex(idx)
+        elif self._combo.count() > 0:
+            self._combo.setCurrentIndex(0)
+
+    def _on_usb_refresh_cameras(self) -> None:
+        if not self._radio_usb.isChecked():
+            return
+        keep = self._combo.currentData()
+        pref = int(keep) if keep is not None else None
+        self._refill_usb_camera_combo(pref)
+
+    def _on_rtsp_connection_hint(self) -> None:
+        QMessageBox.information(
+            self,
+            "RTSP",
+            "Sau khi hoàn tất Wizard, trên màn Quầy hãy chọn «RTSP (IP)», "
+            "nhập URL và bấm «Kết nối RTSP». Có thể chỉnh thêm trong Cài đặt hoặc file cấu hình.",
+        )
+
+    def initializePage(self) -> None:
+        wiz = self.wizard()
+        assert isinstance(wiz, SetupWizard)
+        cfg = wiz._cfg
+        st = cfg.stations[self._col]
         is_rtsp = st.record_camera_kind == "rtsp" and (st.record_rtsp_url or "").strip()
         if is_rtsp:
             self._radio_rtsp.setChecked(True)
             self._rtsp_url.setText((st.record_rtsp_url or "").strip())
             self._stack.setCurrentIndex(1)
+            self._refill_usb_camera_combo(None)
         else:
             self._radio_usb.setChecked(True)
             self._stack.setCurrentIndex(0)
             want = int(st.record_camera_index) if st.record_camera_kind == "usb" else 0
-            idx = self._combo.findData(want)
-            if idx >= 0:
-                self._combo.setCurrentIndex(idx)
-            elif self._combo.count() > 0:
-                self._combo.setCurrentIndex(0)
+            self._refill_usb_camera_combo(want)
 
     def validatePage(self) -> bool:
         wiz = self.wizard()

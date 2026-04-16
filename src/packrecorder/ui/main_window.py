@@ -96,8 +96,12 @@ from packrecorder.hid_pos_scan_worker import HidPosScanWorker
 from packrecorder.serial_scan_worker import SerialScanWorker
 from packrecorder.shutdown_scheduler import compute_next_shutdown_at
 from packrecorder.ui.countdown_dialog import ShutdownCountdownDialog
-from packrecorder.ui.camera_error_messages import mp_worker_error_dialog_text
+from packrecorder.ui.camera_error_messages import (
+    mp_worker_error_dialog_buttons,
+    mp_worker_error_dialog_text,
+)
 from packrecorder.ui.dual_station_widget import DualStationWidget
+from packrecorder.ui.onboarding_banner import dual_station_banner_hint
 from packrecorder.ui.mini_status_overlay import MiniStatusOverlay
 from packrecorder.ui.window_title_summary import format_minimized_window_title
 from packrecorder.ui.preview_tab_policy import should_paint_quay_preview
@@ -778,6 +782,20 @@ class MainWindow(QMainWindow):
             self._stack.setCurrentWidget(self._mode_hint)
             QTimer.singleShot(0, self._restart_scan_workers)
         self._sync_quay_preview_paint_flag()
+        QTimer.singleShot(0, self._refresh_onboarding_banners)
+
+    def _refresh_onboarding_banners(self) -> None:
+        if self._config.multi_camera_mode != "stations":
+            return
+        for col in range(min(2, len(self._config.stations))):
+            st = self._config.stations[col]
+            if self._recorders.get(st.station_id) is not None:
+                continue
+            hint = dual_station_banner_hint(self._config, col=col)
+            if hint:
+                self._dual_panel.set_column_recording_banner(col, hint)
+            else:
+                self._dual_panel.set_column_recording_banner(col, None)
 
     def _sync_quay_preview_paint_flag(self) -> None:
         self._paint_quay_preview = should_paint_quay_preview(
@@ -847,6 +865,7 @@ class MainWindow(QMainWindow):
             self._dual_panel.sync_from_config(
                 self._config, probed_override=found, fast_serial_scan=True
             )
+            QTimer.singleShot(0, self._refresh_onboarding_banners)
 
     def _on_refresh_camera_probe_finished(self, found: list) -> None:
         if self._config.multi_camera_mode == "stations":
@@ -893,6 +912,7 @@ class MainWindow(QMainWindow):
         self._rebuild_order_machines()
         self._update_packer_message()
         self._restart_scan_workers()
+        QTimer.singleShot(0, self._refresh_onboarding_banners)
 
     @staticmethod
     def _stations_config_signature(cfg: AppConfig) -> tuple[object, ...]:
@@ -1157,15 +1177,19 @@ class MainWindow(QMainWindow):
             if now - last < 45.0:
                 return
             self._mp_worker_error_dialog_last_mono[cam_idx] = now
-            reply = QMessageBox.question(
-                self,
-                "Camera không mở được",
-                mp_worker_error_dialog_text(cam_idx),
-                QMessageBox.StandardButton.Retry | QMessageBox.StandardButton.Close,
-                QMessageBox.StandardButton.Close,
-            )
-            if reply == QMessageBox.StandardButton.Retry:
+            retry_lbl, setup_lbl, close_lbl = mp_worker_error_dialog_buttons()
+            box = QMessageBox(self)
+            box.setWindowTitle("Camera không mở được")
+            box.setText(mp_worker_error_dialog_text(cam_idx))
+            retry_btn = box.addButton(retry_lbl, QMessageBox.ButtonRole.AcceptRole)
+            setup_btn = box.addButton(setup_lbl, QMessageBox.ButtonRole.ActionRole)
+            box.addButton(close_lbl, QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked == retry_btn:
                 QTimer.singleShot(0, self._restart_scan_workers)
+            elif clicked == setup_btn:
+                QTimer.singleShot(0, self._open_setup_wizard)
         except Exception:
             log_session_error(
                 "Lỗi trong _on_mp_worker_error.",
@@ -1787,10 +1811,32 @@ class MainWindow(QMainWindow):
             )
 
     def _mini_overlay_line_pair(self) -> tuple[str, str]:
+        texts, _kinds = self._mini_overlay_lines_styled()
+        return texts
+
+    def _mini_overlay_line_kind_for_column(self, col: int) -> str:
         if self._config.multi_camera_mode != "stations":
-            return ("Pack Recorder", "—")
+            return "idle"
+        if col >= len(self._config.stations):
+            return "idle"
+        st = self._config.stations[col]
+        rec = self._recorders.get(st.station_id)
+        if rec is not None:
+            return "recording"
+        rid = station_record_cam_id(st, col)
+        pl = self._mp_pipelines.get(rid)
+        if pl is not None and not pl.is_ready:
+            return "error"
+        return "idle"
+
+    def _mini_overlay_lines_styled(
+        self,
+    ) -> tuple[tuple[str, str], tuple[str, str]]:
+        if self._config.multi_camera_mode != "stations":
+            return (("Pack Recorder", "—"), ("idle", "idle"))
         lines: list[str] = []
-        for st in self._config.stations[:2]:
+        kinds: list[str] = []
+        for col, st in enumerate(self._config.stations[:2]):
             oid = self._station_recording_order.get(st.station_id, "")
             rec = self._recorders.get(st.station_id)
             if rec is not None and oid:
@@ -1800,14 +1846,16 @@ class MainWindow(QMainWindow):
                 lines.append(f"{st.packer_label}: Đang ghi")
             else:
                 lines.append(f"{st.packer_label}: Chờ quét")
+            kinds.append(self._mini_overlay_line_kind_for_column(col))
         while len(lines) < 2:
             lines.append("—")
-        return (lines[0], lines[1])
+            kinds.append("idle")
+        return ((lines[0], lines[1]), (kinds[0], kinds[1]))
 
     def _update_station_summary_displays(self) -> None:
-        a, b = self._mini_overlay_line_pair()
+        (a, b), kinds = self._mini_overlay_lines_styled()
         if self._mini_overlay.isVisible():
-            self._mini_overlay.set_lines(a, b)
+            self._mini_overlay.set_lines_styled((a, b), kinds)
         if self._tray is not None:
             self._tray.setToolTip(f"Pack Recorder\n{a}\n{b}")
 
@@ -2413,6 +2461,7 @@ class MainWindow(QMainWindow):
         self._refresh_worker_recording_flags()
         self._sync_recording_elapsed_timer()
         self._refresh_preview_roi_locks()
+        QTimer.singleShot(0, self._refresh_onboarding_banners)
 
     def _stop_all_recording_for_shutdown(self) -> None:
         self._pip_timer.stop()
@@ -2613,6 +2662,7 @@ class MainWindow(QMainWindow):
                 if qa is not None:
                     tray_ok = self._config.minimize_to_tray and self._tray is not None
                     qa.setQuitOnLastWindowClosed(not tray_ok)
+                QTimer.singleShot(0, self._refresh_onboarding_banners)
         finally:
             self._restart_scan_workers()
 
@@ -2662,6 +2712,7 @@ class MainWindow(QMainWindow):
                 if qa is not None:
                     tray_ok = self._config.minimize_to_tray and self._tray is not None
                     qa.setQuitOnLastWindowClosed(not tray_ok)
+                QTimer.singleShot(0, self._refresh_onboarding_banners)
         finally:
             self._restart_scan_workers()
 

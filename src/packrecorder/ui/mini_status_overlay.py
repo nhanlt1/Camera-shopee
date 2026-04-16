@@ -4,6 +4,29 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
+MiniOverlayLineKind = str  # "idle" | "recording" | "error"
+
+
+def line_style_stylesheet(kind: str) -> str:
+    """Stylesheet cho một dòng overlay (spec §6.2b — màu theo trạng thái)."""
+    base = (
+        "font-size:10pt;font-family:Segoe UI,Consolas,'Cascadia Mono',sans-serif;"
+    )
+    if kind == "recording":
+        return (
+            base
+            + "color:#c8e6c9;background-color:#1b5e20;padding:4px 8px;border-radius:4px;"
+        )
+    if kind == "error":
+        return (
+            base
+            + "color:#ffebee;background-color:#b71c1c;padding:4px 8px;border-radius:4px;"
+        )
+    return (
+        base
+        + "color:#eceff1;background-color:#37474f;padding:4px 8px;border-radius:4px;"
+    )
+
 
 class MiniStatusOverlay(QWidget):
     """Hai dòng trạng thái quầy khi cửa sổ chính thu nhỏ / ẩn (spec 6.2b)."""
@@ -27,13 +50,25 @@ class MiniStatusOverlay(QWidget):
             f = QFont()
             f.setPointSize(10)
             lb.setFont(f)
-            lb.setStyleSheet("color:#eceff1;background-color:#37474f;padding:4px 8px;border-radius:4px;")
+            lb.setStyleSheet(line_style_stylesheet("idle"))
         lay.addWidget(self._line1)
         lay.addWidget(self._line2)
 
     def set_lines(self, line1: str, line2: str) -> None:
-        self._line1.setText(line1)
-        self._line2.setText(line2)
+        self.set_lines_styled(
+            (line1, line2),
+            ("idle", "idle"),
+        )
+
+    def set_lines_styled(
+        self,
+        texts: tuple[str, str],
+        kinds: tuple[str, str],
+    ) -> None:
+        self._line1.setText(texts[0])
+        self._line2.setText(texts[1])
+        self._line1.setStyleSheet(line_style_stylesheet(kinds[0]))
+        self._line2.setStyleSheet(line_style_stylesheet(kinds[1]))
 
     def set_click_through(self, on: bool) -> None:
         self._click_through = bool(on)

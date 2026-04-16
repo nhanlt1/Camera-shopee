@@ -3,7 +3,11 @@
 
 def mp_worker_error_dialog_text(cam_idx: int) -> str:
     return (
-        f"Camera {cam_idx}: thử lại mở thiết bị hoặc vào Tệp → «Thiết lập máy & quầy» "
-        "để đổi camera/URL RTSP.\n"
-        "Bấm «Thử lại» để khởi động lại toàn bộ luồng camera (giống watchdog)."
+        f"Camera {cam_idx}: thử lại mở thiết bị hoặc đổi camera / URL RTSP trong "
+        "«Thiết lập máy & quầy».\n"
+        "Chi tiết kỹ thuật nằm trong nhật ký phiên."
     )
+
+
+def mp_worker_error_dialog_buttons() -> tuple[str, str, str]:
+    return ("Thử lại", "Thiết lập máy & quầy", "Đóng")
