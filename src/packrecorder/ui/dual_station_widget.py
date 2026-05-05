@@ -1011,9 +1011,10 @@ class DualStationWidget(QWidget):
         """Chỉ khóa ô Mã đơn khi dùng COM có cổng (serial worker tự điền)."""
         if not (0 <= col < len(self._scanner_input_kind)):
             return False
-        if self._scanner_kind_data(col) == "hid_pos":
+        kind = self._scanner_kind_data(col)
+        if kind in ("hid_pos", "keyboard"):
             return False
-        if self._scanner_kind_data(col) == "com":
+        if kind == "com":
             port = self._scanner[col].currentData()
             return bool(port and str(port).strip())
         return False
@@ -1446,7 +1447,8 @@ class DualStationWidget(QWidget):
         if not (0 <= col < len(self._manual_col_order)):
             return
         if source == "enter" and self._scanner_com_only:
-            if self._scanner_kind_data(col) != "hid_pos":
+            kind = self._scanner_kind_data(col)
+            if kind not in ("hid_pos", "keyboard"):
                 return
         text = normalize_manual_order_text(self._manual_col_order[col].text())
         if not text:

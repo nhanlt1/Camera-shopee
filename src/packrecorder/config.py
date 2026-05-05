@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from packrecorder.record_resolution import normalize_record_resolution_preset
 
-ScannerInputKind = Literal["com", "hid_pos"]
+ScannerInputKind = Literal["com", "hid_pos", "keyboard", "camera"]
 from packrecorder.record_roi import clamp_norm_rect
 
 SoundMode = Literal["speaker", "scanner_host"]
@@ -272,7 +272,13 @@ def normalize_record_video_codec(value: str) -> RecordVideoCodec:
 
 def _normalize_scanner_input_kind(value: object) -> ScannerInputKind:
     s = str(value or "").strip().lower()
-    return "hid_pos" if s == "hid_pos" else "com"
+    if s == "hid_pos":
+        return "hid_pos"
+    if s in ("keyboard", "wedge"):
+        return "keyboard"
+    if s == "camera":
+        return "camera"
+    return "com"
 
 
 def _normalize_usb_hex_id(value: object) -> str:
@@ -337,6 +343,14 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
         sk = _normalize_scanner_input_kind(getattr(s, "scanner_input_kind", "com"))
         if sk == "hid_pos" and (not vid or not pid):
             sk = "com"
+        if sk == "keyboard":
+            s = replace(s, scanner_serial_port="")
+            vid = ""
+            pid = ""
+        if sk == "camera":
+            s = replace(s, scanner_serial_port="")
+            vid = ""
+            pid = ""
         s = replace(s, scanner_usb_vid=vid, scanner_usb_pid=pid, scanner_input_kind=sk)
         cfg.stations[i] = s
     ensure_distinct_station_record_cameras(cfg)
@@ -376,8 +390,12 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
     cfg.close_to_tray = bool(cfg.close_to_tray)
     cfg.low_process_priority = bool(cfg.low_process_priority)
     cfg.tray_show_toast_on_order = bool(cfg.tray_show_toast_on_order)
-    # Luôn chạy theo luồng quét chuyên dụng (COM/HID POS), không dùng keyboard-wedge/global hook.
-    cfg.scanner_com_only = True
+    # scanner_com_only: True => chỉ chấp nhận luồng quét chuyên dụng (COM/HID POS), tắt wedge.
+    # False => cho phép wedge (gõ phím vào ô mã + Enter). Tự suy ra từ scanner_input_kind của các station.
+    any_wedge_station = any(
+        getattr(st, "scanner_input_kind", "com") == "keyboard" for st in cfg.stations
+    )
+    cfg.scanner_com_only = not any_wedge_station
     cfg.enable_global_barcode_hook = False
     oc = float(cfg.order_transition_cooldown_s)
     if oc < 0:
@@ -517,6 +535,21 @@ def station_uses_hid_pos_scanner(st: StationConfig) -> bool:
 def station_uses_dedicated_barcode_scanner(st: StationConfig) -> bool:
     """Máy quét phần cứng (COM hoặc HID POS), không đọc mã bằng pyzbar trên camera."""
     return station_uses_serial_scanner(st) or station_uses_hid_pos_scanner(st)
+
+
+def station_uses_keyboard_wedge(st: StationConfig) -> bool:
+    """Máy quét gõ phím (HID keyboard wedge): nhập trực tiếp vào ô mã + Enter."""
+    return getattr(st, "scanner_input_kind", "com") == "keyboard"
+
+
+def station_uses_camera_decode(st: StationConfig) -> bool:
+    """Đọc mã bằng camera ghi (pyzbar). Bao gồm cả cấu hình cũ: kind=com nhưng không có port."""
+    kind = getattr(st, "scanner_input_kind", "com")
+    if kind == "camera":
+        return True
+    if kind == "com" and not (st.scanner_serial_port or "").strip():
+        return True
+    return False
 
 
 def _camera_is_serial_peer_record_feed(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, Signal
@@ -27,6 +28,11 @@ from packrecorder.hid_scanner_discovery import (
     list_usage_page_devices,
     vid_pid_int_from_device,
 )
+from packrecorder.ui.winson_com_qr_panel import WinsonComQrPanel
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
 
 
 class HidPosSetupWizard(QWizard):
@@ -71,6 +77,13 @@ class HidPosSetupWizard(QWizard):
                 "3) Chọn đúng máy quét hoặc dùng rút/cắm để tự nhận diện."
             )
         )
+        lay.addWidget(
+            QLabel(
+                "Nếu chưa mở được trang cấu hình scanner, có thể quét mã dưới đây "
+                "để chuyển scanner sang chế độ COM tạm thời rồi cấu hình tiếp."
+            )
+        )
+        lay.addWidget(WinsonComQrPanel(_repo_root(), p))
         lay.addStretch(1)
         return p
 

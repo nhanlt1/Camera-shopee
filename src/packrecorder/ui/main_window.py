@@ -62,6 +62,7 @@ from packrecorder.config import (
     station_for_decode_camera,
     station_record_cam_id,
     station_uses_dedicated_barcode_scanner,
+    station_uses_keyboard_wedge,
     station_uses_hid_pos_scanner,
     station_uses_serial_scanner,
 )
@@ -647,6 +648,11 @@ class MainWindow(QMainWindow):
 
     def apply_start_in_tray(self) -> None:
         if not (self._config.start_in_tray and self._config.minimize_to_tray):
+            return
+        if self._config.first_run_setup_required or not self._config.onboarding_complete:
+            mark_session_phase(
+                "Bỏ «khởi động trong khay»: cần hiển thị wizard/thiết lập lần đầu."
+            )
             return
         if self._tray is None:
             self._status.showMessage(
@@ -2410,7 +2416,11 @@ class MainWindow(QMainWindow):
         st = self._station_by_id(station_id)
         same_stop = True
         if st is not None:
-            same_stop = station_uses_dedicated_barcode_scanner(st)
+            # Wedge (keyboard) should behave like dedicated scanner:
+            # scan same code again => stop recording.
+            same_stop = station_uses_dedicated_barcode_scanner(
+                st
+            ) or station_uses_keyboard_wedge(st)
         r = sm.on_scan(
             code,
             is_shutdown_countdown=False,

@@ -104,6 +104,26 @@ QDialog {
   background: #ffffff;
 }
 
+/* Setup/HID wizard: ép nền sáng để tránh nền đen trên một số máy Windows + Fusion */
+QWizard,
+QWizardPage {
+  background: #ffffff;
+  color: #212121;
+}
+
+QWizard QWidget {
+  background: #ffffff;
+  color: #212121;
+}
+
+QWizard QLabel,
+QWizard QGroupBox,
+QWizard QRadioButton,
+QWizard QCheckBox {
+  color: #212121;
+  background: transparent;
+}
+
 /* QScrollArea viewport mặc định hay nền đen trên Windows — Cài đặt và vùng cuộn lồng nhau */
 QScrollArea {
   background-color: #ffffff;

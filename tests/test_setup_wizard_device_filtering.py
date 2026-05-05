@@ -15,17 +15,41 @@ def _cfg() -> AppConfig:
     return cfg
 
 
-def test_scanner_default_mode_prefers_com_for_fresh_state() -> None:
+def test_scanner_default_mode_fresh_state_is_visible() -> None:
+    """Fresh state (kind=com, no port) → mode «visible» (0)."""
     st = StationConfig("s", "Máy", 0, 0)
     assert scanner_default_mode_id(st) == 0
 
 
-def test_scanner_default_mode_keeps_hid_override() -> None:
+def test_scanner_default_mode_keeps_hid_as_background() -> None:
+    """HID POS đã có VID/PID → mode «background» (1)."""
     st = StationConfig("s", "Máy", 0, 0)
     st.scanner_input_kind = "hid_pos"
     st.scanner_usb_vid = "1A2B"
     st.scanner_usb_pid = "3C4D"
     assert scanner_default_mode_id(st) == 1
+
+
+def test_scanner_default_mode_com_with_port_is_background() -> None:
+    """COM đã có cổng → mode «background» (1)."""
+    st = StationConfig("s", "Máy", 0, 0)
+    st.scanner_input_kind = "com"
+    st.scanner_serial_port = "COM5"
+    assert scanner_default_mode_id(st) == 1
+
+
+def test_scanner_default_mode_keyboard_wedge_is_visible() -> None:
+    """Wedge keyboard → mode «visible» (0)."""
+    st = StationConfig("s", "Máy", 0, 0)
+    st.scanner_input_kind = "keyboard"
+    assert scanner_default_mode_id(st) == 0
+
+
+def test_scanner_default_mode_camera_is_visible() -> None:
+    """Camera decode → mode «visible» (0)."""
+    st = StationConfig("s", "Máy", 0, 0)
+    st.scanner_input_kind = "camera"
+    assert scanner_default_mode_id(st) == 0
 
 
 def test_filter_camera_indices_for_machine2_excludes_machine1_usb() -> None:

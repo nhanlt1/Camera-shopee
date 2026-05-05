@@ -58,6 +58,7 @@ class WinsonComQrPanel(QWidget):
         )
         self._txt.setWordWrap(True)
         self._btn = QPushButton("Thử lại / Làm mới thiết bị")
+        self._refresh_callback = None
         self._txt_code = QLabel(WINSON_MODE_USB_COM)
         self._txt_code.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._txt_code.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -68,8 +69,10 @@ class WinsonComQrPanel(QWidget):
         lay.addWidget(self._btn)
 
     def set_on_refresh(self, callback) -> None:
-        try:
-            self._btn.clicked.disconnect()
-        except TypeError:
-            pass
+        if self._refresh_callback is not None:
+            try:
+                self._btn.clicked.disconnect(self._refresh_callback)
+            except (TypeError, RuntimeError):
+                pass
+        self._refresh_callback = callback
         self._btn.clicked.connect(callback)
