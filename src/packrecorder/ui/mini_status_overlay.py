@@ -10,21 +10,25 @@ MiniOverlayLineKind = str  # "idle" | "recording" | "error"
 def line_style_stylesheet(kind: str) -> str:
     """Stylesheet cho một dòng overlay (spec §6.2b — màu theo trạng thái)."""
     base = (
-        "font-size:10pt;font-family:Segoe UI,Consolas,'Cascadia Mono',sans-serif;"
+        "font-size:10pt;font-family:'Segoe UI Variable',Segoe UI,Consolas,"
+        "'Cascadia Mono',sans-serif;font-weight:600;"
     )
     if kind == "recording":
         return (
             base
-            + "color:#c8e6c9;background-color:#1b5e20;padding:4px 8px;border-radius:4px;"
+            + "color:#0e700e;background-color:#dff6dd;padding:6px 10px;"
+            "border-radius:8px;border:1px solid #107c10;"
         )
     if kind == "error":
         return (
             base
-            + "color:#ffebee;background-color:#b71c1c;padding:4px 8px;border-radius:4px;"
+            + "color:#8f0804;background-color:#fde7e9;padding:6px 10px;"
+            "border-radius:8px;border:1px solid #c42b1c;"
         )
     return (
         base
-        + "color:#eceff1;background-color:#37474f;padding:4px 8px;border-radius:4px;"
+        + "color:#202020;background-color:#f3f3f3;padding:6px 10px;"
+        "border-radius:8px;border:1px solid #e5e5e5;"
     )
 
 
@@ -43,7 +47,7 @@ class MiniStatusOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._click_through = False
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setContentsMargins(12, 10, 12, 10)
         self._line1 = QLabel("Máy 1: —")
         self._line2 = QLabel("Máy 2: —")
         for lb in (self._line1, self._line2):
@@ -69,6 +73,10 @@ class MiniStatusOverlay(QWidget):
         self._line2.setText(texts[1])
         self._line1.setStyleSheet(line_style_stylesheet(kinds[0]))
         self._line2.setStyleSheet(line_style_stylesheet(kinds[1]))
+
+    def set_second_line_visible(self, visible: bool) -> None:
+        """Một quầy: ẩn dòng thứ hai để overlay gọn."""
+        self._line2.setVisible(bool(visible))
 
     def set_click_through(self, on: bool) -> None:
         self._click_through = bool(on)

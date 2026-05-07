@@ -42,7 +42,7 @@ class RoiPreviewLabel(QWidget):
         super().__init__(parent)
         self.setMinimumSize(360, 200)
         self.setStyleSheet(
-            "background:#1a1a1a;color:#888;border:1px solid #424242;border-radius:6px;"
+            "background:#2d2d2d;color:#c8c6c4;border:1px solid #484644;border-radius:8px;"
         )
         self._bgr: bytes | None = None
         self._src_w = 0

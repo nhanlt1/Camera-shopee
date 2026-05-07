@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import sys
+import time
 from multiprocessing.queues import Queue
 from queue import Empty
 from typing import Any, Optional
@@ -14,7 +15,6 @@ from packrecorder.ipc.health import is_stale
 from packrecorder.ipc.capture_worker import mp_capture_worker_entry
 from packrecorder.ipc.frame_ring import attach_ring_shm, close_unlink, ndarray_slot
 from packrecorder.ipc.scanner_worker import mp_scanner_worker_entry
-
 
 class MpCameraPipeline:
     def __init__(
@@ -64,7 +64,6 @@ class MpCameraPipeline:
         self._fps = 30
         self._scanner_started = False
         self._running = False
-
     @property
     def context(self) -> mp.context.BaseContext:
         return self._ctx

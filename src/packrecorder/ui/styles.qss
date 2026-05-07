@@ -1,39 +1,81 @@
-/* Fusion + QSS toàn app: trên Windows palette chữ đôi khi trùng nền → ép màu + font */
+/*
+  Fusion + QSS — giao diện gần Windows 11 (sáng):
+  nền mica nhạt, accent hệ thống Win11, bo góc và spacing rộng hơn.
+*/
+
+/* ---- Tokens (chỉ là comment; QSS không hỗ trợ biến) ----
+   bg-app #F3F3F3  surface #FFFFFF  border #E5E5E5
+   text #202020  secondary #605E5C  accent #0067C0
+*/
 
 QMainWindow {
-  background: #fafafa;
+  background: #f3f3f3;
 }
 
-/* Thanh công cụ (độ phân giải, v.v.) — nền sáng, không bị đen */
 QToolBar {
   background: #ffffff;
   border: none;
-  border-bottom: 1px solid #e0e0e0;
-  spacing: 8px;
-  padding: 4px 8px;
+  border-bottom: 1px solid #e5e5e5;
+  spacing: 10px;
+  padding: 6px 12px;
 }
 
 QToolBar QLabel {
-  color: #212121;
+  color: #202020;
   background: transparent;
 }
 
 QToolBar QComboBox {
   background: #ffffff;
-  color: #212121;
-  border: 1px solid #bdbdbd;
-  border-radius: 4px;
-  padding: 4px 8px;
-  min-height: 22px;
+  color: #202020;
+  border: 1px solid #d1d1d1;
+  border-radius: 6px;
+  padding: 5px 10px;
+  min-height: 24px;
 }
 
 QToolBar QComboBox:hover {
-  border-color: #1976d2;
+  border-color: #0067c0;
+}
+
+QTabWidget::pane {
+  border: 1px solid #e5e5e5;
+  border-radius: 10px;
+  background: #ffffff;
+  margin-top: 10px;
+  padding: 12px;
+  top: -1px;
+}
+
+QTabBar::tab {
+  background: #e8e8e8;
+  color: #605e5c;
+  padding: 10px 20px;
+  margin-right: 4px;
+  border-top-left-radius: 8px;
+  border-top-right-radius: 8px;
+  border: 1px solid transparent;
+  min-width: 72px;
+  font-weight: normal;
+}
+
+QTabBar::tab:selected {
+  background: #ffffff;
+  color: #202020;
+  font-weight: 600;
+  border: 1px solid #e5e5e5;
+  border-bottom-color: #ffffff;
+  margin-bottom: -1px;
+}
+
+QTabBar::tab:hover:!selected {
+  background: #f0f0f0;
+  color: #202020;
 }
 
 QRadioButton {
-  color: #212121;
-  spacing: 6px;
+  color: #202020;
+  spacing: 8px;
 }
 
 QRadioButton::indicator {
@@ -42,89 +84,107 @@ QRadioButton::indicator {
 }
 
 QRadioButton::indicator:unchecked {
-  border: 2px solid #757575;
+  border: 2px solid #797775;
   border-radius: 9px;
   background: #ffffff;
 }
 
 QRadioButton::indicator:checked {
   image: none;
-  border: 2px solid #1976d2;
+  border: 2px solid #0067c0;
   border-radius: 9px;
   background: qradialgradient(cx:0.5, cy:0.5, radius:0.45, fx:0.5, fy:0.5,
-    stop:0 #1976d2, stop:0.55 #1976d2, stop:0.56 #ffffff, stop:1 #ffffff);
+    stop:0 #0067c0, stop:0.55 #0067c0, stop:0.56 #ffffff, stop:1 #ffffff);
 }
 
 QCheckBox {
-  color: #212121;
-  spacing: 6px;
+  color: #202020;
+  spacing: 8px;
 }
 
 QCheckBox::indicator {
   width: 18px;
   height: 18px;
-  border: 2px solid #757575;
-  border-radius: 3px;
+  border: 2px solid #797775;
+  border-radius: 4px;
   background: #ffffff;
 }
 
 QCheckBox::indicator:checked {
-  border-color: #1976d2;
-  background: #1976d2;
+  border-color: #0067c0;
+  background: #0067c0;
 }
 
 QMenuBar {
   background: #ffffff;
-  padding: 4px;
-  border-bottom: 1px solid #e0e0e0;
-  color: #212121;
-  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  padding: 6px 8px;
+  border-bottom: 1px solid #e5e5e5;
+  color: #202020;
+  font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
   font-size: 9pt;
 }
 
 QMenuBar::item {
   background: transparent;
-  color: #212121;
+  color: #202020;
+  padding: 4px 10px;
+  border-radius: 4px;
 }
 
 QMenuBar::item:selected {
-  background: #e3f2fd;
-  color: #212121;
+  background: #f0f0f0;
+  color: #202020;
+}
+
+QMenu {
+  background: #ffffff;
+  color: #202020;
+  border: 1px solid #e5e5e5;
+  padding: 6px;
+}
+
+QMenu::item {
+  padding: 8px 28px 8px 12px;
+  border-radius: 4px;
+}
+
+QMenu::item:selected {
+  background: #f0f0f0;
+  color: #202020;
 }
 
 QStatusBar {
   background: #ffffff;
-  border-top: 1px solid #e0e0e0;
-  color: #212121;
-  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  border-top: 1px solid #e5e5e5;
+  color: #202020;
+  font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
   font-size: 9pt;
+  padding: 4px 8px;
 }
 
 QDialog {
   background: #ffffff;
 }
 
-/* Setup/HID wizard: ép nền sáng để tránh nền đen trên một số máy Windows + Fusion */
 QWizard,
 QWizardPage {
   background: #ffffff;
-  color: #212121;
+  color: #202020;
 }
 
 QWizard QWidget {
   background: #ffffff;
-  color: #212121;
+  color: #202020;
 }
 
 QWizard QLabel,
 QWizard QGroupBox,
 QWizard QRadioButton,
 QWizard QCheckBox {
-  color: #212121;
+  color: #202020;
   background: transparent;
 }
 
-/* QScrollArea viewport mặc định hay nền đen trên Windows — Cài đặt và vùng cuộn lồng nhau */
 QScrollArea {
   background-color: #ffffff;
   border: none;
@@ -138,47 +198,69 @@ QStackedWidget {
   background-color: #ffffff;
 }
 
+QGroupBox {
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  margin-top: 14px;
+  padding: 14px 12px 12px 12px;
+  background: #fafafa;
+  font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  font-size: 9pt;
+}
+
 QLabel,
 QGroupBox,
 QCheckBox,
 QRadioButton,
 QToolButton {
-  color: #212121;
-  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  color: #202020;
+  font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
   font-size: 9pt;
 }
 
 QGroupBox::title {
   subcontrol-origin: margin;
   subcontrol-position: top left;
-  padding: 0 4px;
-  color: #212121;
+  padding: 0 6px;
+  color: #202020;
+  font-weight: 600;
 }
 
 QLineEdit,
 QSpinBox,
 QComboBox {
-  padding: 4px 8px;
-  border: 1px solid #cfd8dc;
-  border-radius: 4px;
+  padding: 6px 10px;
+  border: 1px solid #d1d1d1;
+  border-radius: 6px;
   background: #ffffff;
-  color: #212121;
-  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  color: #202020;
+  font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
   font-size: 9pt;
+  min-height: 22px;
+}
+
+QLineEdit:focus,
+QSpinBox:focus,
+QComboBox:focus,
+QDateEdit:focus {
+  border: 1px solid #0067c0;
 }
 
 QComboBox QAbstractItemView {
   background: #ffffff;
-  color: #212121;
-  selection-background-color: #e3f2fd;
-  selection-color: #212121;
+  color: #202020;
+  selection-background-color: #e5f3ff;
+  selection-color: #202020;
+  border: 1px solid #e5e5e5;
+  border-radius: 6px;
+  padding: 4px;
 }
 
 QListWidget,
 QTreeView,
 QTableView {
-  color: #212121;
-  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  color: #202020;
+  font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
   font-size: 9pt;
 }
 
@@ -187,98 +269,118 @@ QMessageBox {
 }
 
 QMessageBox QLabel {
-  color: #212121;
-  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  color: #202020;
+  font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
   font-size: 9pt;
 }
 
 QPushButton {
-  padding: 6px 14px;
-  border-radius: 4px;
-  background: #1976d2;
+  padding: 8px 16px;
+  border-radius: 6px;
+  background: #0067c0;
   color: #ffffff;
   border: none;
-  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
   font-size: 9pt;
+  font-weight: 600;
+  min-height: 22px;
 }
 
 QPushButton:hover {
-  background: #1565c0;
+  background: #005fb8;
 }
 
-/* Bảng trong dialog (QTableWidget) — tránh nền/vùng header đen trên Windows */
+QPushButton:pressed {
+  background: #005499;
+}
+
+QPushButton:disabled {
+  background: #e5e5e5;
+  color: #a19f9d;
+}
+
+QToolButton {
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+}
+
+QToolButton:hover {
+  background: #f0f0f0;
+  border: 1px solid #e5e5e5;
+}
+
 QTableWidget {
   background: #ffffff;
-  alternate-background-color: #fafafa;
-  color: #212121;
-  gridline-color: #e0e0e0;
-  selection-background-color: #e3f2fd;
-  selection-color: #212121;
-  border: 1px solid #cfd8dc;
-  border-radius: 4px;
+  alternate-background-color: #f9f9f9;
+  color: #202020;
+  gridline-color: #e5e5e5;
+  selection-background-color: #e5f3ff;
+  selection-color: #202020;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
 }
 
-/* Vùng header dọc dưới dòng cuối (không phải ::section) — không tô sẽ thành vệt đen */
 QTableWidget QHeaderView {
-  background-color: #f5f5f5;
+  background-color: #f3f3f3;
 }
 
 QTableWidget::item {
-  padding: 4px;
-  color: #212121;
+  padding: 6px 8px;
+  color: #202020;
   background: #ffffff;
 }
 
 QTableWidget::item:alternate {
-  background: #fafafa;
+  background: #f9f9f9;
 }
 
 QTableWidget::item:selected {
-  background: #e3f2fd;
-  color: #212121;
+  background: #e5f3ff;
+  color: #202020;
 }
 
 QHeaderView::section {
-  background: #f5f5f5;
-  color: #212121;
-  padding: 6px 8px;
-  border: 1px solid #e0e0e0;
-  font-weight: bold;
+  background: #f3f3f3;
+  color: #202020;
+  padding: 8px 10px;
+  border: 1px solid #e5e5e5;
+  font-weight: 600;
 }
 
-/* Cột số thứ tự dòng — chữ xám, nền sáng (tránh chữ đen trên nền tối) */
 QHeaderView::section:vertical {
-  background: #f5f5f5;
-  color: #757575;
-  padding: 4px 6px;
-  border: 1px solid #e0e0e0;
+  background: #f3f3f3;
+  color: #605e5c;
+  padding: 6px 8px;
+  border: 1px solid #e5e5e5;
   font-weight: normal;
 }
 
 QTableCornerButton::section {
-  background: #f5f5f5;
-  border: 1px solid #e0e0e0;
+  background: #f3f3f3;
+  border: 1px solid #e5e5e5;
 }
 
 QDateEdit {
-  padding: 4px 8px;
-  border: 1px solid #cfd8dc;
-  border-radius: 4px;
+  padding: 6px 10px;
+  border: 1px solid #d1d1d1;
+  border-radius: 6px;
   background: #ffffff;
-  color: #212121;
-  font-family: "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
+  color: #202020;
+  font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "MS Shell Dlg 2", sans-serif;
   font-size: 9pt;
 }
 
 QCalendarWidget QWidget#qt_calendar_navigationbar,
 QCalendarWidget QAbstractItemView {
   background: #ffffff;
-  color: #212121;
+  color: #202020;
 }
 
 QCalendarWidget QAbstractItemView:enabled {
-  color: #212121;
+  color: #202020;
   background: #ffffff;
-  selection-background-color: #1976d2;
+  selection-background-color: #0067c0;
   selection-color: #ffffff;
 }

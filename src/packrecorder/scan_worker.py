@@ -8,6 +8,7 @@ from typing import Optional, Union
 from PySide6.QtCore import QThread, Signal
 
 from packrecorder.barcode_decode import decode_barcodes_bgr
+from packrecorder.config import is_rtsp_stream_url
 from packrecorder.record_roi import crop_bgr_frame, norm_to_pixels
 
 # Nạp opencv_video trước cv2: module đặt OPENCV_LOG_LEVEL rồi mới import cv2.
@@ -15,6 +16,7 @@ from packrecorder.opencv_video import (
     configure_opencv_logging,
     open_rtsp_capture,
     open_video_capture,
+    safe_video_capture_read,
 )
 from packrecorder.record_resolution import apply_capture_resolution
 from packrecorder.session_log import log_session_error
@@ -33,6 +35,8 @@ _FALLBACK_CAPTURE_FPS = 30
 _SYNC_WH_PROBE_READS = 12
 # RTSP: mỗi read có timeout (opencv_video); giảm số lần probe để không chờ quá lâu khi lỗi mạng.
 _SYNC_WH_PROBE_READS_RTSP = 4
+_READ_FAILS_BEFORE_USB_REOPEN = 3
+_MAX_USB_CAPTURE_REOPEN = 8
 
 
 class ScanWorker(QThread):
@@ -98,10 +102,12 @@ class ScanWorker(QThread):
         try:
             configure_opencv_logging()
             if isinstance(self._capture_source, str):
-                try:
-                    cap = open_rtsp_capture(self._capture_source)
-                except Exception:
-                    cap = None
+                cap = None
+                if is_rtsp_stream_url(self._capture_source):
+                    try:
+                        cap = open_rtsp_capture(self._capture_source)
+                    except Exception:
+                        cap = None
                 if cap is None:
                     cap = cv2.VideoCapture()
                 if not cap.isOpened():
@@ -165,7 +171,7 @@ class ScanWorker(QThread):
                     else _SYNC_WH_PROBE_READS
                 )
                 for _ in range(n_probe):
-                    ok, probe = cap.read()
+                    ok, probe = safe_video_capture_read(cap)
                     if (
                         ok
                         and probe is not None
@@ -174,17 +180,42 @@ class ScanWorker(QThread):
                     ):
                         ch, cw = int(probe.shape[0]), int(probe.shape[1])
                         break
+                    time.sleep(0.02)
                 if cw != start_w or ch != start_h:
                     self.camera_opened.emit(self._camera_index, cw, ch, fps)
                 preview_discard_left = max(0, _PREVIEW_WARMUP_DISCARD_FRAMES)
+            usb_read_fail_streak = 0
+            usb_reopen_count = 0
             while self._running:
                 if not cap or not cap.isOpened():
                     time.sleep(0.2)
                     continue
-                ok, frame = cap.read()
+                ok, frame = safe_video_capture_read(cap)
                 if not ok:
+                    usb_read_fail_streak += 1
+                    if (
+                        isinstance(self._capture_source, int)
+                        and usb_reopen_count < _MAX_USB_CAPTURE_REOPEN
+                        and usb_read_fail_streak >= _READ_FAILS_BEFORE_USB_REOPEN
+                    ):
+                        usb_reopen_count += 1
+                        usb_read_fail_streak = 0
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                        time.sleep(0.4)
+                        cap = open_video_capture(int(self._capture_source))
+                        if cap.isOpened():
+                            continue
+                        self.capture_failed.emit(
+                            self._camera_index,
+                            "Không mở lại được webcam sau khi mất tín hiệu (USB).",
+                        )
+                        return
                     time.sleep(0.02)
                     continue
+                usb_read_fail_streak = 0
                 if getattr(frame, "ndim", 0) != 3 or int(frame.shape[2]) < 3:
                     continue
                 fh, fw = int(frame.shape[0]), int(frame.shape[1])

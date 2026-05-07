@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import List, Optional, Set
 
-from packrecorder.opencv_video import configure_opencv_logging, open_video_capture
+from packrecorder.opencv_video import (
+    configure_opencv_logging,
+    open_video_capture,
+    safe_video_capture_read,
+)
 
 configure_opencv_logging()
 
@@ -33,7 +37,7 @@ def probe_opencv_camera_indices(
             if not cap.isOpened():
                 continue
             if require_frame:
-                ok, _ = cap.read()
+                ok, _ = safe_video_capture_read(cap)
                 if not ok:
                     continue
             found.append(i)

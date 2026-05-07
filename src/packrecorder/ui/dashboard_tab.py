@@ -46,7 +46,7 @@ class HourlyBarChartWidget(QWidget):
             x = margin + i * (bar_w + 1)
             bh = int((float(c) / float(max_count)) * (h - 18))
             y = margin + (h - bh)
-            p.fillRect(x, y, bar_w, bh, QColor("#1976d2"))
+            p.fillRect(x, y, bar_w, bh, QColor("#0067c0"))
         p.end()
 
 
@@ -128,11 +128,20 @@ class DashboardTab(QWidget):
     def _make_card(self, title: str, value: str) -> QFrame:
         frame = QFrame(self)
         frame.setFrameShape(QFrame.Shape.StyledPanel)
+        frame.setStyleSheet(
+            "QFrame { background:#ffffff; border:1px solid #e5e5e5; border-radius:10px; }"
+        )
         lay = QVBoxLayout(frame)
+        lay.setContentsMargins(14, 12, 14, 12)
         title_lb = QLabel(title, frame)
-        title_lb.setStyleSheet("color:#546e7a;")
+        title_lb.setStyleSheet(
+            "color:#605e5c;font-family:'Segoe UI Variable','Segoe UI',sans-serif;"
+        )
         value_lb = QLabel(value, frame)
-        value_lb.setStyleSheet("font-size:18px;font-weight:700;")
+        value_lb.setStyleSheet(
+            "font-size:20px;font-weight:700;color:#202020;"
+            "font-family:'Segoe UI Variable','Segoe UI',sans-serif;"
+        )
         value_lb.setProperty("kpi_value", True)
         lay.addWidget(title_lb)
         lay.addWidget(value_lb)

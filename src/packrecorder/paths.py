@@ -29,11 +29,14 @@ def day_folder_name(d: date) -> str:
 
 
 def build_output_path(
-    root: Path, order_id_raw: str, packer_raw: str, when: datetime
+    root: Path, order_id_raw: str, packer_raw: str, when: datetime, *, suffix: str = ""
 ) -> Path:
     oid = sanitize_order_id(order_id_raw)
     pk = sanitize_packer_label(packer_raw)
     day = day_folder_name(when.date())
     # Giống thư mục ngày (YYYY-MM-DD); giờ dùng gạch (Windows cấm ':' trong tên file).
     stamp = f"{when:%Y-%m-%d}_{when:%H-%M-%S}"
-    return root / day / f"{oid}_{pk}_{stamp}.mp4"
+    tail = ""
+    if suffix.strip():
+        tail = f"_{sanitize_packer_label(suffix)}"
+    return root / day / f"{oid}_{pk}_{stamp}{tail}.mp4"

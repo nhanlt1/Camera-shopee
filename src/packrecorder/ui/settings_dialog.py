@@ -263,7 +263,7 @@ class SettingsDialog(QDialog):
             "HID POS raw: app vẫn nhận mã khi cửa sổ ẩn."
         )
         _tray_vidpid_note.setWordWrap(True)
-        _tray_vidpid_note.setStyleSheet("color:#555;font-size:smaller;")
+        _tray_vidpid_note.setStyleSheet("color:#605e5c;font-size:smaller;")
         tf.addRow(_tray_vidpid_note)
         tf.addRow(self._minimize_tray)
         tf.addRow(self._start_tray)
@@ -290,7 +290,7 @@ class SettingsDialog(QDialog):
             "Click-through: không tương tác được với overlay — chỉ bật khi thật sự cần."
         )
         _mini_warn.setWordWrap(True)
-        _mini_warn.setStyleSheet("color:#555;font-size:smaller;")
+        _mini_warn.setStyleSheet("color:#605e5c;font-size:smaller;")
         self._mini_corner = QComboBox()
         for val, label in (
             ("bottom_right", "Dưới phải"),
@@ -610,7 +610,19 @@ class SettingsDialog(QDialog):
         self._stations_container = QWidget()
         self._stations_layout = QVBoxLayout(self._stations_container)
         self._stations_layout.setContentsMargins(0, 0, 0, 0)
-        self._station_rows: list[tuple[QLineEdit, QSpinBox, str, QPushButton]] = []
+        self._station_rows: list[
+            tuple[
+                QLineEdit,
+                QSpinBox,
+                QCheckBox,
+                QCheckBox,
+                QCheckBox,
+                QCheckBox,
+                QCheckBox,
+                str,
+                QPushButton,
+            ]
+        ] = []
         st_scroll = QScrollArea()
         st_scroll.setWidgetResizable(True)
         st_scroll.setWidget(self._stations_container)
@@ -629,7 +641,16 @@ class SettingsDialog(QDialog):
         stations = list(cfg.stations) if cfg.stations else default_stations()
         for s in stations:
             self._append_station_row(
-                s.packer_label, s.record_camera_index, s.station_id
+                s.packer_label,
+                s.record_camera_index,
+                s.station_id,
+                show_label=getattr(s, "mini_overlay_show_label", True),
+                show_state=getattr(s, "mini_overlay_show_state", True),
+                show_order=getattr(s, "mini_overlay_show_order", True),
+                show_current_time=getattr(s, "mini_overlay_show_current_time", True),
+                show_packing_duration=getattr(
+                    s, "mini_overlay_show_packing_duration", True
+                ),
             )
         if not self._station_rows:
             self._add_station_row()
@@ -640,6 +661,12 @@ class SettingsDialog(QDialog):
         packer: str,
         rec: int,
         sid: str | None = None,
+        *,
+        show_label: bool = True,
+        show_state: bool = True,
+        show_order: bool = True,
+        show_current_time: bool = True,
+        show_packing_duration: bool = True,
     ) -> None:
         sid = sid or str(uuid.uuid4())
         row_w = QWidget()
@@ -648,22 +675,50 @@ class SettingsDialog(QDialog):
         rs = QSpinBox()
         rs.setRange(0, 9)
         rs.setValue(rec)
+        cb_label = QCheckBox("Tên máy")
+        cb_label.setChecked(show_label)
+        cb_state = QCheckBox("Trạng thái")
+        cb_state.setChecked(show_state)
+        cb_order = QCheckBox("Mã đơn")
+        cb_order.setChecked(show_order)
+        cb_current_time = QCheckBox("Thời gian hiện tại")
+        cb_current_time.setChecked(show_current_time)
+        cb_duration = QCheckBox("Thời lượng đóng gói")
+        cb_duration.setChecked(show_packing_duration)
         rm = QPushButton("Xóa")
         grid.addWidget(QLabel("Nhãn"), 0, 0)
         grid.addWidget(pk, 0, 1)
         grid.addWidget(QLabel("Camera (mã nguồn)"), 0, 2)
         grid.addWidget(rs, 0, 3)
         grid.addWidget(rm, 0, 4)
+        grid.addWidget(QLabel("Overlay"), 1, 0)
+        grid.addWidget(cb_label, 1, 1)
+        grid.addWidget(cb_state, 1, 2)
+        grid.addWidget(cb_order, 1, 3)
+        grid.addWidget(cb_current_time, 2, 1)
+        grid.addWidget(cb_duration, 2, 2)
 
         def do_remove() -> None:
             if len(self._station_rows) <= 1:
                 return
-            self._station_rows[:] = [x for x in self._station_rows if x[3] is not rm]
+            self._station_rows[:] = [x for x in self._station_rows if x[8] is not rm]
             row_w.deleteLater()
 
         rm.clicked.connect(do_remove)
         self._stations_layout.addWidget(row_w)
-        self._station_rows.append((pk, rs, sid, rm))
+        self._station_rows.append(
+            (
+                pk,
+                rs,
+                cb_label,
+                cb_state,
+                cb_order,
+                cb_current_time,
+                cb_duration,
+                sid,
+                rm,
+            )
+        )
 
     def _add_station_row(self) -> None:
         n = len(self._station_rows) + 1
@@ -721,7 +776,17 @@ class SettingsDialog(QDialog):
     def _collect_stations(self) -> list[StationConfig]:
         old_by_id = {s.station_id: s for s in self._cfg.stations}
         out: list[StationConfig] = []
-        for pk, rs, sid, _rm in self._station_rows:
+        for (
+            pk,
+            rs,
+            cb_label,
+            cb_state,
+            cb_order,
+            cb_current_time,
+            cb_duration,
+            sid,
+            _rm,
+        ) in self._station_rows:
             label = pk.text().strip() or "Máy 1"
             prev = old_by_id.get(sid)
             cam = rs.value()
@@ -742,6 +807,11 @@ class SettingsDialog(QDialog):
                     else "com",
                     preview_display_index=-1,
                     record_roi_norm=prev.record_roi_norm if prev else None,
+                    mini_overlay_show_label=cb_label.isChecked(),
+                    mini_overlay_show_state=cb_state.isChecked(),
+                    mini_overlay_show_order=cb_order.isChecked(),
+                    mini_overlay_show_current_time=cb_current_time.isChecked(),
+                    mini_overlay_show_packing_duration=cb_duration.isChecked(),
                 )
             )
         return out if out else default_stations()

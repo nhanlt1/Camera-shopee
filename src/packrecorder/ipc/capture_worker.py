@@ -12,6 +12,7 @@ from typing import Optional, Union
 
 import numpy as np
 
+from packrecorder.config import is_rtsp_stream_url
 from packrecorder.ipc.capture_backoff import (
     CAPTURE_MAX_CONSECUTIVE_READ_FAILS,
     read_fail_backoff_seconds,
@@ -21,6 +22,7 @@ from packrecorder.opencv_video import (
     configure_opencv_logging,
     open_rtsp_capture,
     open_video_capture,
+    safe_video_capture_read,
 )
 from packrecorder.record_resolution import apply_capture_resolution
 
@@ -30,7 +32,9 @@ _PREVIEW_WARMUP_DISCARD_FRAMES = 0
 _FALLBACK_CAPTURE_FPS = 30
 _SYNC_WH_PROBE_READS = 12
 _SYNC_WH_PROBE_READS_RTSP = 4
-
+# USB: sau N lần read lỗi liên tiếp thử đóng+mở lại capture (cắm lại camera).
+_READ_FAILS_BEFORE_USB_REOPEN = 3
+_MAX_USB_CAPTURE_REOPEN = 8
 
 def mp_capture_worker_entry(
     camera_index: int,
@@ -60,10 +64,12 @@ def mp_capture_worker_entry(
     cap: Optional[cv2.VideoCapture] = None
     try:
         if isinstance(capture_source, str):
-            try:
-                cap = open_rtsp_capture(capture_source)
-            except Exception:
-                cap = None
+            cap = None
+            if is_rtsp_stream_url(capture_source):
+                try:
+                    cap = open_rtsp_capture(capture_source)
+                except Exception:
+                    cap = None
             if cap is None:
                 cap = cv2.VideoCapture()
         else:
@@ -123,7 +129,7 @@ def mp_capture_worker_entry(
             else _SYNC_WH_PROBE_READS
         )
         for _ in range(n_probe):
-            ok, probe = cap.read()
+            ok, probe = safe_video_capture_read(cap)
             if (
                 ok
                 and probe is not None
@@ -132,12 +138,14 @@ def mp_capture_worker_entry(
             ):
                 ch, cw = int(probe.shape[0]), int(probe.shape[1])
                 break
+            time.sleep(0.02)
         shm = create_ring_shm(ch, cw, n_slots)
         events_queue.put(
             ("ready", camera_index, shm.name, cw, ch, fps, n_slots)
         )
         preview_discard_left = max(0, _PREVIEW_WARMUP_DISCARD_FRAMES)
         read_fails = 0
+        usb_reopen_count = 0
         while not stop_event.is_set():
             try:
                 heartbeat_capture.value = time.time()
@@ -146,9 +154,32 @@ def mp_capture_worker_entry(
             if not cap.isOpened():
                 time.sleep(0.2)
                 continue
-            ok, frame = cap.read()
+            ok, frame = safe_video_capture_read(cap)
             if not ok:
                 read_fails += 1
+                if (
+                    isinstance(capture_source, int)
+                    and usb_reopen_count < _MAX_USB_CAPTURE_REOPEN
+                    and read_fails >= _READ_FAILS_BEFORE_USB_REOPEN
+                ):
+                    usb_reopen_count += 1
+                    read_fails = 0
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                    time.sleep(0.4)
+                    cap = open_video_capture(int(capture_source))
+                    if cap.isOpened():
+                        continue
+                    events_queue.put(
+                        (
+                            "capture_failed",
+                            camera_index,
+                            "Không mở lại được webcam sau khi mất tín hiệu (USB).",
+                        )
+                    )
+                    return
                 if read_fails >= CAPTURE_MAX_CONSECUTIVE_READ_FAILS:
                     events_queue.put(
                         (

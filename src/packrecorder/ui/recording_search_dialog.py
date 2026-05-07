@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import shutil
 from datetime import datetime
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+import re
 from typing import Callable
 
 from PySide6.QtCore import QDate, QSize, Qt, QUrl, Signal
@@ -19,6 +21,8 @@ from PySide6.QtGui import (
     QPixmap,
     QShowEvent,
 )
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -36,6 +40,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QStyle,
     QSpinBox,
+    QSlider,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
@@ -48,6 +54,237 @@ from packrecorder.recording_index import RecordingIndex, recordings_db_path_for_
 
 # Cửa sổ 16 ngày gần nhất (kể cả hôm nay): today-15 … today
 _DATE_RANGE_DAYS = 16
+_CAM_SUFFIX_RE = re.compile(r"(?:^|[_-])cam(\d+)(?:\.[A-Za-z0-9]+)?$", re.IGNORECASE)
+
+
+@dataclass
+class _ViewerClip:
+    cam_index: int | None
+    cam_label: str
+    path: Path
+
+
+def _parse_cam_index_from_row(row: dict) -> int | None:
+    for key in ("rel_key", "resolved_path"):
+        raw = str(row.get(key) or "").strip()
+        if not raw:
+            continue
+        m = _CAM_SUFFIX_RE.search(Path(raw).stem)
+        if m:
+            try:
+                return int(m.group(1))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _group_key_for_row(row: dict) -> tuple[str, str, str]:
+    order = str(row.get("order_id") or "").strip()
+    packer = str(row.get("packer") or "").strip()
+    created = str(row.get("created_at") or "").strip()
+    return (order, packer, created)
+
+
+class MultiCamViewerDialog(QDialog):
+    def __init__(self, clips: list[_ViewerClip], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Xem video đa camera")
+        self.resize(1080, 720)
+        self._clips = list(clips)
+        self._players: list[QMediaPlayer] = []
+        self._audios: list[QAudioOutput] = []
+        self._grid_videos: list[QVideoWidget] = []
+        self._active_idx = 0
+        self._last_position_ms = 0
+        self._single_mode = True
+        self._cam_buttons: list[QToolButton] = []
+        self._seeking = False
+
+        self._stack = QStackedWidget(self)
+        self._single_video = QVideoWidget(self)
+        self._single_video.setMinimumHeight(360)
+        self._stack.addWidget(self._single_video)
+        self._grid_wrap = QWidget(self)
+        self._grid_layout = QGridLayout(self._grid_wrap)
+        self._grid_layout.setContentsMargins(0, 0, 0, 0)
+        self._grid_layout.setSpacing(8)
+        self._stack.addWidget(self._grid_wrap)
+
+        self._play_btn = QPushButton("Play")
+        self._play_btn.clicked.connect(self._toggle_play_pause)
+        self._mode_btn = QPushButton("Xem lưới")
+        self._mode_btn.clicked.connect(self._toggle_mode)
+        self._seek = QSlider(Qt.Orientation.Horizontal)
+        self._seek.setRange(0, 0)
+        self._seek.sliderPressed.connect(self._on_seek_pressed)
+        self._seek.sliderReleased.connect(self._on_seek_released)
+        self._seek.sliderMoved.connect(self._on_seek_moved)
+        self._time_lbl = QLabel("00:00 / 00:00")
+        self._time_lbl.setMinimumWidth(120)
+        self._time_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        cam_row = QHBoxLayout()
+        cam_row.setContentsMargins(0, 0, 0, 0)
+        cam_row.setSpacing(6)
+        for i, clip in enumerate(self._clips):
+            b = QToolButton(self)
+            b.setText(clip.cam_label)
+            b.setCheckable(True)
+            b.clicked.connect(lambda _checked=False, idx=i: self._switch_camera(idx))
+            self._cam_buttons.append(b)
+            cam_row.addWidget(b)
+        cam_row.addStretch(1)
+        cam_row.addWidget(self._mode_btn)
+
+        ctl = QHBoxLayout()
+        ctl.setContentsMargins(0, 0, 0, 0)
+        ctl.addWidget(self._play_btn)
+        ctl.addWidget(self._seek, 1)
+        ctl.addWidget(self._time_lbl)
+
+        lay = QVBoxLayout(self)
+        lay.addLayout(cam_row)
+        lay.addWidget(self._stack, 1)
+        lay.addLayout(ctl)
+
+        self._init_players()
+        self._refresh_cam_buttons()
+        self._sync_ui_time()
+
+    @staticmethod
+    def _fmt_ms(ms: int) -> str:
+        s = max(0, int(ms // 1000))
+        m, ss = divmod(s, 60)
+        h, mm = divmod(m, 60)
+        if h > 0:
+            return f"{h:02d}:{mm:02d}:{ss:02d}"
+        return f"{mm:02d}:{ss:02d}"
+
+    def _init_players(self) -> None:
+        for clip in self._clips:
+            audio = QAudioOutput(self)
+            audio.setVolume(0.6)
+            player = QMediaPlayer(self)
+            player.setAudioOutput(audio)
+            player.setSource(QUrl.fromLocalFile(str(clip.path.resolve())))
+            self._audios.append(audio)
+            self._players.append(player)
+            vw = QVideoWidget(self._grid_wrap)
+            vw.setMinimumSize(260, 180)
+            self._grid_videos.append(vw)
+            idx = len(self._players) - 1
+            r = idx // 2
+            c = idx % 2
+            self._grid_layout.addWidget(vw, r, c)
+        self._apply_video_outputs()
+        if self._players:
+            self._bind_master_signals(self._players[self._active_idx])
+
+    def _bind_master_signals(self, player: QMediaPlayer) -> None:
+        player.positionChanged.connect(self._on_master_position_changed)
+        player.durationChanged.connect(self._on_master_duration_changed)
+
+    def _apply_video_outputs(self) -> None:
+        for i, p in enumerate(self._players):
+            if self._single_mode:
+                if i == self._active_idx:
+                    p.setVideoOutput(self._single_video)
+                else:
+                    p.setVideoOutput(None)
+            else:
+                if i < len(self._grid_videos):
+                    p.setVideoOutput(self._grid_videos[i])
+
+    def _master_player(self) -> QMediaPlayer | None:
+        if not self._players:
+            return None
+        return self._players[self._active_idx]
+
+    def _capture_current_progress(self) -> tuple[int, bool]:
+        p = self._master_player()
+        if p is None:
+            return (self._last_position_ms, False)
+        state = p.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        pos = int(p.position())
+        self._last_position_ms = max(0, pos)
+        return (self._last_position_ms, state)
+
+    def _apply_progress_to_all(self, position_ms: int, play: bool) -> None:
+        for p in self._players:
+            p.setPosition(max(0, int(position_ms)))
+            if play:
+                p.play()
+            else:
+                p.pause()
+        self._sync_ui_time()
+
+    def _refresh_cam_buttons(self) -> None:
+        for i, b in enumerate(self._cam_buttons):
+            b.setChecked(i == self._active_idx)
+
+    def _switch_camera(self, idx: int) -> None:
+        if not (0 <= idx < len(self._players)) or idx == self._active_idx:
+            return
+        pos, was_playing = self._capture_current_progress()
+        self._active_idx = idx
+        cur = self._players[self._active_idx]
+        self._bind_master_signals(cur)
+        self._apply_video_outputs()
+        cur.setPosition(pos)
+        if was_playing:
+            cur.play()
+        else:
+            cur.pause()
+        self._refresh_cam_buttons()
+        self._sync_ui_time()
+
+    def _toggle_mode(self) -> None:
+        pos, was_playing = self._capture_current_progress()
+        self._single_mode = not self._single_mode
+        self._mode_btn.setText("Xem lưới" if self._single_mode else "Xem 1 cam")
+        self._stack.setCurrentIndex(0 if self._single_mode else 1)
+        self._apply_video_outputs()
+        self._apply_progress_to_all(pos, was_playing)
+
+    def _toggle_play_pause(self) -> None:
+        p = self._master_player()
+        if p is None:
+            return
+        play = p.playbackState() != QMediaPlayer.PlaybackState.PlayingState
+        self._apply_progress_to_all(self._capture_current_progress()[0], play)
+        self._play_btn.setText("Pause" if play else "Play")
+
+    def _sync_ui_time(self) -> None:
+        p = self._master_player()
+        if p is None:
+            self._time_lbl.setText("00:00 / 00:00")
+            self._seek.setRange(0, 0)
+            return
+        pos = int(p.position())
+        dur = max(0, int(p.duration()))
+        if not self._seeking:
+            self._seek.setRange(0, dur)
+            self._seek.setValue(pos)
+        self._time_lbl.setText(f"{self._fmt_ms(pos)} / {self._fmt_ms(dur)}")
+
+    def _on_master_position_changed(self, _pos: int) -> None:
+        self._sync_ui_time()
+
+    def _on_master_duration_changed(self, _dur: int) -> None:
+        self._sync_ui_time()
+
+    def _on_seek_pressed(self) -> None:
+        self._seeking = True
+
+    def _on_seek_moved(self, _pos: int) -> None:
+        self._sync_ui_time()
+
+    def _on_seek_released(self) -> None:
+        self._seeking = False
+        target = int(self._seek.value())
+        pos, was_playing = self._capture_current_progress()
+        _ = pos
+        self._apply_progress_to_all(target, was_playing)
 
 
 class _DateRangeDialog(QDialog):
@@ -236,6 +473,8 @@ class RecordingSearchPanel(QWidget):
         super().__init__(parent)
         self._cfg = cfg
         self._last_rows: list[dict] = []
+        self._table_row_meta: list[dict] = []
+        self._grouped_rows: list[dict] = []
         self._on_retention_controls_changed = on_retention_controls_changed
 
         _ = office_search_stale  # API giữ tương thích; không còn popup «dữ liệu trễ»
@@ -343,7 +582,7 @@ class RecordingSearchPanel(QWidget):
         lay.addLayout(filter_row)
         lay.addWidget(
             QLabel(
-                "Kết quả: double-click một dòng để mở file; nút tải/mở thư mục nằm ở cột thao tác."
+                "Kết quả: double-click dòng cha để xem đa cam trong app; dòng con vẫn hỗ trợ mở/tải/xóa từng file."
             )
         )
         lay.addWidget(self._table)
@@ -396,6 +635,66 @@ class RecordingSearchPanel(QWidget):
         if self._db_ok_for_search:
             self._run_search()
 
+    def _build_grouped_rows(self, rows: list[dict]) -> list[dict]:
+        grouped: dict[tuple[str, str, str], list[dict]] = {}
+        for r in rows:
+            key = _group_key_for_row(r)
+            grouped.setdefault(key, []).append(r)
+        out: list[dict] = []
+        for key, members in grouped.items():
+            sorted_members = sorted(
+                members,
+                key=lambda row: (
+                    (_parse_cam_index_from_row(row) is None),
+                    int(_parse_cam_index_from_row(row) or 999),
+                    str(row.get("resolved_path") or ""),
+                ),
+            )
+            clips: list[_ViewerClip] = []
+            for m in sorted_members:
+                p = _resolve_video_path(m)
+                if p is None or not p.is_file():
+                    continue
+                cam_idx = _parse_cam_index_from_row(m)
+                label = f"Cam {cam_idx}" if cam_idx is not None else f"Cam {len(clips)+1}"
+                clips.append(_ViewerClip(cam_idx, label, p))
+            out.append(
+                {
+                    "key": key,
+                    "rows": sorted_members,
+                    "cam_count": len(sorted_members),
+                    "clips": clips,
+                    "order_id": key[0],
+                    "packer": key[1],
+                    "created_at": key[2],
+                }
+            )
+        out.sort(key=lambda g: str(g.get("created_at") or ""), reverse=True)
+        return out
+
+    def _open_group_viewer(self, group_idx: int, *, preferred_cam: int | None = None) -> None:
+        if not (0 <= group_idx < len(self._grouped_rows)):
+            return
+        g = self._grouped_rows[group_idx]
+        clips = list(g.get("clips") or [])
+        if not clips:
+            QMessageBox.information(
+                self,
+                "Không mở được",
+                "Không tìm thấy file video khả dụng để xem trong app.",
+            )
+            return
+        if preferred_cam is not None:
+            clips.sort(
+                key=lambda c: (
+                    c.cam_index is None,
+                    0 if c.cam_index == preferred_cam else 1,
+                    int(c.cam_index or 0),
+                )
+            )
+        dlg = MultiCamViewerDialog(clips, self)
+        dlg.exec()
+
     def _run_search(self) -> None:
         dbp = recordings_db_path_for_search(self._cfg)
         if dbp is None or not dbp.is_file():
@@ -434,87 +733,127 @@ class RecordingSearchPanel(QWidget):
             idx.close()
 
         self._last_rows = rows
-        self._table.setRowCount(len(rows))
+        self._grouped_rows = self._build_grouped_rows(rows)
+        self._table_row_meta = []
+        total_display_rows = sum(1 + len(g["rows"]) for g in self._grouped_rows)
+        self._table.setRowCount(total_display_rows)
         app = QApplication.instance()
         trash_icon = (
             app.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon)
             if app is not None
             else QIcon()
         )
-        for i, r in enumerate(rows):
-            raw_st = r.get("storage_status", "") or ""
-            path_str = r.get("resolved_path", "") or ""
-            display_path = path_str
-            if len(display_path) > 70:
-                display_path = "…" + display_path[-67:]
+        app_style = app.style() if app is not None else None
+        download_icon = (
+            app_style.standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
+            if app_style is not None
+            else QIcon()
+        )
+        folder_icon = (
+            app_style.standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
+            if app_style is not None
+            else QIcon()
+        )
+        row_i = 0
+        for group_idx, group in enumerate(self._grouped_rows):
+            order = str(group.get("order_id") or "")
+            packer = str(group.get("packer") or "")
+            created = str(group.get("created_at") or "")
+            cam_count = int(group.get("cam_count") or 0)
+            parent_order = QTableWidgetItem(f"{order} ({cam_count} cam)")
+            f = parent_order.font()
+            f.setBold(True)
+            parent_order.setFont(f)
+            parent_order.setForeground(QBrush(QColor("#1f3a5f")))
+            self._table.setItem(row_i, 0, parent_order)
+            self._table.setItem(row_i, 1, _item_optional_text(packer))
+            self._table.setItem(row_i, 2, _item_time_display(created))
+            total_duration = sum(float(r.get("duration_seconds") or 0.0) for r in group["rows"])
+            self._table.setItem(row_i, 3, _item_duration(total_duration))
+            self._table.setItem(row_i, 4, QTableWidgetItem("Nhóm đa-cam" if cam_count > 1 else "1 cam"))
+            self._table.setItem(row_i, 5, QTableWidgetItem("Xem trong app"))
+            wrap_parent = QWidget()
+            wp = QHBoxLayout(wrap_parent)
+            wp.setContentsMargins(0, 0, 0, 0)
+            btn_view = QToolButton()
+            btn_view.setText("Xem")
+            btn_view.setToolTip("Mở trình xem nhiều camera trong app")
+            btn_view.clicked.connect(partial(self._open_group_viewer, group_idx))
+            wp.addWidget(btn_view)
+            self._table.setCellWidget(row_i, 6, wrap_parent)
+            self._table_row_meta.append({"type": "group", "group_idx": group_idx})
+            row_i += 1
 
-            it0 = _item_optional_text(str(r.get("order_id", "") or ""))
-            it1 = _item_optional_text(str(r.get("packer", "") or ""))
-            it2 = _item_time_display(str(r.get("created_at", "") or ""))
-            it3 = _item_duration(r.get("duration_seconds", 0))
-            it4 = _item_storage_status(raw_st)
-            it5 = QTableWidgetItem(display_path)
-            it5.setToolTip(path_str)
-            it5.setData(Qt.ItemDataRole.UserRole, path_str)
+            for child in group["rows"]:
+                raw_st = child.get("storage_status", "") or ""
+                path_str = child.get("resolved_path", "") or ""
+                display_path = path_str
+                if len(display_path) > 70:
+                    display_path = "…" + display_path[-67:]
+                cam_idx = _parse_cam_index_from_row(child)
+                cam_txt = f"  ↳ Cam {cam_idx}" if cam_idx is not None else "  ↳ Camera"
+                it0 = QTableWidgetItem(cam_txt)
+                it0.setForeground(QBrush(QColor("#555555")))
+                self._table.setItem(row_i, 0, it0)
+                self._table.setItem(row_i, 1, _item_optional_text(str(child.get("packer", "") or "")))
+                self._table.setItem(row_i, 2, _item_time_display(str(child.get("created_at", "") or "")))
+                self._table.setItem(row_i, 3, _item_duration(child.get("duration_seconds", 0)))
+                self._table.setItem(row_i, 4, _item_storage_status(raw_st))
+                it5 = QTableWidgetItem(display_path)
+                it5.setToolTip(path_str)
+                it5.setData(Qt.ItemDataRole.UserRole, path_str)
+                self._table.setItem(row_i, 5, it5)
 
-            self._table.setItem(i, 0, it0)
-            self._table.setItem(i, 1, it1)
-            self._table.setItem(i, 2, it2)
-            self._table.setItem(i, 3, it3)
-            self._table.setItem(i, 4, it4)
-            self._table.setItem(i, 5, it5)
-
-            wrap = QWidget()
-            wrap_l = QHBoxLayout(wrap)
-            wrap_l.setContentsMargins(0, 0, 0, 0)
-            wrap_l.setSpacing(2)
-            app_style = app.style() if app is not None else None
-            download_icon = (
-                app_style.standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
-                if app_style is not None
-                else QIcon()
-            )
-            folder_icon = (
-                app_style.standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon)
-                if app_style is not None
-                else QIcon()
-            )
-            btn_download = QToolButton()
-            btn_download.setIcon(download_icon)
-            btn_download.setIconSize(QSize(16, 16))
-            btn_download.setToolTip("Tải video")
-            btn_download.setAccessibleName("Tải video")
-            btn_download.setAutoRaise(True)
-            btn_download.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_download.clicked.connect(partial(self._on_save_copy, i))
-            btn_open_folder = QToolButton()
-            btn_open_folder.setIcon(folder_icon)
-            btn_open_folder.setIconSize(QSize(16, 16))
-            btn_open_folder.setToolTip("Mở folder")
-            btn_open_folder.setAccessibleName("Mở folder")
-            btn_open_folder.setAutoRaise(True)
-            btn_open_folder.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_open_folder.clicked.connect(partial(self._on_open_folder, i))
-            btn_delete = QToolButton()
-            btn_delete.setIcon(trash_icon)
-            btn_delete.setIconSize(QSize(16, 16))
-            btn_delete.setToolTip("Xóa file video và xóa khỏi danh sách.")
-            btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_delete.setAccessibleName("Xóa video")
-            btn_delete.setAutoRaise(True)
-            btn_delete.clicked.connect(partial(self._on_delete_video, i))
-            wrap_l.addWidget(btn_download)
-            wrap_l.addWidget(btn_open_folder)
-            wrap_l.addWidget(btn_delete)
-            self._table.setCellWidget(i, 6, wrap)
+                wrap = QWidget()
+                wrap_l = QHBoxLayout(wrap)
+                wrap_l.setContentsMargins(0, 0, 0, 0)
+                wrap_l.setSpacing(2)
+                btn_view_cam = QToolButton()
+                btn_view_cam.setText("Xem")
+                btn_view_cam.setToolTip("Mở viewer tại camera này")
+                btn_view_cam.clicked.connect(partial(self._open_group_viewer, group_idx, preferred_cam=cam_idx))
+                btn_download = QToolButton()
+                btn_download.setIcon(download_icon)
+                btn_download.setIconSize(QSize(16, 16))
+                btn_download.setToolTip("Tải video")
+                btn_download.setAccessibleName("Tải video")
+                btn_download.setAutoRaise(True)
+                btn_download.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_download.clicked.connect(partial(self._on_save_copy, row_i))
+                btn_open_folder = QToolButton()
+                btn_open_folder.setIcon(folder_icon)
+                btn_open_folder.setIconSize(QSize(16, 16))
+                btn_open_folder.setToolTip("Mở folder")
+                btn_open_folder.setAccessibleName("Mở folder")
+                btn_open_folder.setAutoRaise(True)
+                btn_open_folder.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_open_folder.clicked.connect(partial(self._on_open_folder, row_i))
+                btn_delete = QToolButton()
+                btn_delete.setIcon(trash_icon)
+                btn_delete.setIconSize(QSize(16, 16))
+                btn_delete.setToolTip("Xóa file video và xóa khỏi danh sách.")
+                btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_delete.setAccessibleName("Xóa video")
+                btn_delete.setAutoRaise(True)
+                btn_delete.clicked.connect(partial(self._on_delete_video, row_i))
+                wrap_l.addWidget(btn_view_cam)
+                wrap_l.addWidget(btn_download)
+                wrap_l.addWidget(btn_open_folder)
+                wrap_l.addWidget(btn_delete)
+                self._table.setCellWidget(row_i, 6, wrap)
+                self._table_row_meta.append({"type": "child", "row": child, "group_idx": group_idx, "cam_idx": cam_idx})
+                row_i += 1
 
         for col in (0, 1, 2, 3, 4, 6):
             self._table.resizeColumnToContents(col)
 
     def _on_save_copy(self, row_index: int) -> None:
-        if row_index < 0 or row_index >= len(self._last_rows):
+        if row_index < 0 or row_index >= len(self._table_row_meta):
             return
-        row = self._last_rows[row_index]
+        meta = self._table_row_meta[row_index]
+        if meta.get("type") != "child":
+            return
+        row = dict(meta.get("row") or {})
         src = _resolve_video_path(row)
         if src is None or not src.is_file():
             QMessageBox.warning(
@@ -549,9 +888,12 @@ class RecordingSearchPanel(QWidget):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(dst_path.parent)))
 
     def _on_open_folder(self, row_index: int) -> None:
-        if row_index < 0 or row_index >= len(self._last_rows):
+        if row_index < 0 or row_index >= len(self._table_row_meta):
             return
-        row = self._last_rows[row_index]
+        meta = self._table_row_meta[row_index]
+        if meta.get("type") != "child":
+            return
+        row = dict(meta.get("row") or {})
         src = _resolve_video_path(row)
         if src is None:
             QMessageBox.warning(
@@ -588,9 +930,15 @@ class RecordingSearchPanel(QWidget):
         if index.column() == 6:
             return
         r = index.row()
-        if r < 0 or r >= len(self._last_rows):
+        if r < 0 or r >= len(self._table_row_meta):
             return
-        row = self._last_rows[r]
+        meta = self._table_row_meta[r]
+        if meta.get("type") == "group":
+            self._open_group_viewer(int(meta.get("group_idx") or 0))
+            return
+        if meta.get("type") != "child":
+            return
+        row = dict(meta.get("row") or {})
         path = _resolve_video_path(row)
         if path is not None and path.is_file():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
@@ -602,9 +950,12 @@ class RecordingSearchPanel(QWidget):
         )
 
     def _on_delete_video(self, row_index: int) -> None:
-        if row_index < 0 or row_index >= len(self._last_rows):
+        if row_index < 0 or row_index >= len(self._table_row_meta):
             return
-        row = self._last_rows[row_index]
+        meta = self._table_row_meta[row_index]
+        if meta.get("type") != "child":
+            return
+        row = dict(meta.get("row") or {})
         order = str(row.get("order_id", "") or "")
         row_id = int(row.get("id") or 0)
         if row_id <= 0:

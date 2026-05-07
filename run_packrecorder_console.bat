@@ -18,6 +18,9 @@ if errorlevel 1 (
   echo [CANH BAO] Khong cai duoc pillow — app van chay, chu tren video dung font don gian.
   echo Thu tay: .venv\Scripts\pip install -e ".\[dev]"
 )
+REM Webcam USB khong mo (cam 0): thu bo dong duoi — DirectShow truoc MSMF.
+REM set PACKRECORDER_PREFER_DSHOW=1
+REM Neu driver loi khi doc thu khung: set PACKRECORDER_SKIP_CAPTURE_VALIDATE=1
 REM pythonw = khong cua so console — process doc lap; dong CMD nay khong lam tat app.
 if exist ".venv\Scripts\pythonw.exe" (
   echo Dang mo Pack Recorder (tach khoi cua so nay)...

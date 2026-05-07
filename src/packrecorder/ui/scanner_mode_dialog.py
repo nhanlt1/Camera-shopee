@@ -21,7 +21,7 @@ class ScannerModeDialog(QDialog):
 
         self._desc = QLabel()
         self._desc.setWordWrap(True)
-        self._desc.setStyleSheet("font-size:13px;color:#333;")
+        self._desc.setStyleSheet("font-size:13px;color:#202020;")
 
         self._img = QLabel("Không tìm thấy ảnh mã cấu hình.")
         self._img.setAlignment(Qt.AlignmentFlag.AlignCenter)

@@ -74,4 +74,5 @@ def decode_barcodes_bgr(bgr: object) -> list:
             by_data[d] = o
         elif _is_qr_like(o) and not _is_qr_like(by_data[d]):
             by_data[d] = o
-    return sort_zbar_results_qr_first(list(by_data.values()))
+    out = sort_zbar_results_qr_first(list(by_data.values()))
+    return out

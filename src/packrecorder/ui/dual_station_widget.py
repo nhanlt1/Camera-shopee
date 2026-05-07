@@ -10,22 +10,26 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QFileDialog,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSizePolicy,
     QStyle,
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QStackedWidget,
 )
 
 from packrecorder.camera_probe import probe_opencv_camera_indices
-from packrecorder.config import AppConfig, StationConfig
+from packrecorder.config import AppConfig, StationConfig, is_rtsp_stream_url
 from packrecorder.hid_scanner_discovery import (
     HID_POS_USAGE_PAGE,
     device_label,
@@ -43,6 +47,7 @@ from packrecorder.serial_ports import (
     vid_pid_by_device,
 )
 from packrecorder.ui.hid_pos_setup_wizard import HidPosSetupWizard
+from packrecorder.ui.camera_preview import bgr_bytes_to_pixmap
 from packrecorder.ui.roi_preview_label import RoiPreviewLabel
 from packrecorder.ui.scanner_mode_dialog import ScannerModeDialog
 
@@ -61,7 +66,7 @@ def _station_camera_indices(stations: list[StationConfig]) -> set[int]:
     """Index camera đang dùng trong cấu hình (luôn đưa vào combo dù probe không thấy)."""
     out: set[int] = set()
     for idx, s in enumerate(stations[:2]):
-        if s.record_camera_kind == "rtsp" and (s.record_rtsp_url or "").strip():
+        if s.record_camera_kind == "rtsp" and is_rtsp_stream_url(s.record_rtsp_url):
             continue
         out.add(int(s.record_camera_index))
         out.add(int(s.decode_camera_index))
@@ -74,18 +79,30 @@ def _merge_probe_with_config(probed: list[int], cfg: AppConfig) -> list[int]:
     return sorted(base)
 
 
+def _normalize_usb_indices(indices: list[int]) -> list[int]:
+    out: list[int] = []
+    for raw in indices:
+        try:
+            cam = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= cam <= 9 and cam not in out:
+            out.append(cam)
+    return out[:8]
+
+
 class DualStationWidget(QWidget):
     """Hai cột: camera ghi, máy quét COM (USB serial), hoặc camera đọc mã."""
 
     _BANNER_TEXT_STYLE = (
-        "background-color:#ffebee;color:#b71c1c;padding:4px 8px;"
-        "font-size:12px;font-weight:bold;border-radius:4px;border:1px solid #c62828;"
-        "font-family:Consolas,'Cascadia Mono','Segoe UI',sans-serif;"
+        "background-color:#fde7e9;color:#8f0804;padding:6px 10px;"
+        "font-size:12px;font-weight:bold;border-radius:8px;border:1px solid #c42b1c;"
+        "font-family:'Cascadia Mono',Consolas,'Segoe UI Variable','Segoe UI',sans-serif;"
     )
     _PENDING_ORDER_BANNER_STYLE = (
-        "background-color:#ffcdd2;color:#7f0000;padding:6px 10px;"
-        "font-size:13px;font-weight:bold;border-radius:6px;border:2px solid #b71c1c;"
-        "font-family:Consolas,'Cascadia Mono','Segoe UI',sans-serif;"
+        "background-color:#fde7e9;color:#6a0a0a;padding:8px 12px;"
+        "font-size:13px;font-weight:bold;border-radius:8px;border:1px solid #c42b1c;"
+        "font-family:'Cascadia Mono',Consolas,'Segoe UI Variable','Segoe UI',sans-serif;"
     )
 
     fields_changed = Signal()
@@ -149,6 +166,20 @@ class DualStationWidget(QWidget):
         self._scanner_selected_label: list[QLabel] = []
         self._tl_scan: list[QLabel] = []
         self._adv_btn: list[QToolButton] = []
+        self._station_column_count = 2
+        self._single_watch_indices: list[int] = []
+        self._single_focus_camera: int | None = None
+        self._single_recording_active: bool = False
+        self._single_view_mode: str = "focus"
+        self._single_frames: dict[int, tuple[bytes, int, int]] = {}
+        self._single_toolbar_wrap: QWidget | None = None
+        self._single_camera_btn_row: QHBoxLayout | None = None
+        self._single_mode_toggle_btn: QToolButton | None = None
+        self._single_preview_stack: QStackedWidget | None = None
+        self._single_grid_area: QScrollArea | None = None
+        self._single_grid_wrap: QWidget | None = None
+        self._single_grid_layout: QGridLayout | None = None
+        self._single_grid_labels: dict[int, QLabel] = {}
 
         columns = QHBoxLayout()
         for col in range(2):
@@ -158,6 +189,10 @@ class DualStationWidget(QWidget):
             banner = QLabel()
             banner.setVisible(False)
             banner.setWordWrap(False)
+            banner.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+                | Qt.TextInteractionFlag.TextSelectableByKeyboard
+            )
             banner.setAlignment(
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
             )
@@ -170,16 +205,17 @@ class DualStationWidget(QWidget):
             elapsed.setAlignment(Qt.AlignmentFlag.AlignCenter)
             elapsed.setWordWrap(False)
             elapsed.setStyleSheet(
-                "background-color:#ffebee;color:#b71c1c;padding:4px 6px;"
-                "font-size:12px;font-weight:bold;border-radius:4px;"
-                "font-family:Consolas,'Cascadia Mono','Segoe UI Mono',monospace;"
-                "border:1px solid #c62828;"
+                "background-color:#fde7e9;color:#8f0804;padding:6px 8px;"
+                "font-size:12px;font-weight:bold;border-radius:8px;"
+                "font-family:'Cascadia Mono',Consolas,'Segoe UI Mono',monospace;"
+                "border:1px solid #c42b1c;"
             )
             self._record_elapsed.append(elapsed)
             v.addWidget(elapsed, 0)
 
             row_m = QHBoxLayout()
             row_m.setContentsMargins(0, 4, 0, 0)
+            row_m.setSpacing(8)
             mo = QLineEdit()
             mo.setPlaceholderText(
                 f"Máy {col + 1}: nhập mã thủ công và bấm nút «Bắt đầu ghi». "
@@ -196,20 +232,67 @@ class DualStationWidget(QWidget):
             btn_m.clicked.connect(
                 lambda _checked=False, c=col: self._emit_manual_col(c, source="button")
             )
-            row_m.addWidget(QLabel("Mã đơn:"))
+            lab_mo = QLabel("Mã đơn:")
+            lab_mo.setSizePolicy(
+                QSizePolicy.Policy.Fixed,
+                QSizePolicy.Policy.Fixed,
+            )
+            row_m.addWidget(lab_mo, 0)
+            mo.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Fixed,
+            )
+            btn_m.setSizePolicy(
+                QSizePolicy.Policy.Fixed,
+                QSizePolicy.Policy.Fixed,
+            )
             row_m.addWidget(mo, 1)
-            row_m.addWidget(btn_m)
+            row_m.addWidget(btn_m, 0)
             order_row_w = QWidget()
             order_row_w.setLayout(row_m)
             self._manual_col_order.append(mo)
             v.addWidget(order_row_w, 0)
 
             prev = RoiPreviewLabel()
-            prev.setMinimumSize(360, 200)
-            prev.setMaximumHeight(280)
             prev.roi_changed.connect(self._emit_debounced)
             self._preview.append(prev)
-            v.addWidget(prev, 1)
+            if col == 0:
+                self._single_preview_stack = QStackedWidget()
+                self._single_preview_stack.addWidget(prev)
+                self._single_toolbar_wrap = QWidget()
+                single_tools = QVBoxLayout(self._single_toolbar_wrap)
+                single_tools.setContentsMargins(0, 6, 0, 0)
+                single_tools.setSpacing(6)
+                row_tools = QHBoxLayout()
+                row_tools.setContentsMargins(0, 0, 0, 0)
+                row_tools.setSpacing(6)
+                btn_mode_toggle = QToolButton()
+                btn_mode_toggle.clicked.connect(self._toggle_single_view_mode)
+                btn_add = QToolButton()
+                btn_add.setText("+ Thêm camera")
+                btn_add.clicked.connect(self._on_add_single_preview_camera_clicked)
+                row_tools.addWidget(btn_mode_toggle)
+                row_tools.addWidget(btn_add)
+                row_tools.addStretch(1)
+                single_tools.addLayout(row_tools)
+                cams_row = QHBoxLayout()
+                cams_row.setContentsMargins(0, 0, 0, 0)
+                cams_row.setSpacing(6)
+                self._single_camera_btn_row = cams_row
+                single_tools.addLayout(cams_row)
+                self._single_mode_toggle_btn = btn_mode_toggle
+                self._single_grid_area = QScrollArea()
+                self._single_grid_area.setWidgetResizable(True)
+                self._single_grid_wrap = QWidget()
+                self._single_grid_layout = QGridLayout(self._single_grid_wrap)
+                self._single_grid_layout.setContentsMargins(0, 0, 0, 0)
+                self._single_grid_layout.setSpacing(8)
+                self._single_grid_area.setWidget(self._single_grid_wrap)
+                self._single_preview_stack.addWidget(self._single_grid_area)
+                v.addWidget(self._single_preview_stack, 1)
+                v.addWidget(self._single_toolbar_wrap, 0)
+            else:
+                v.addWidget(prev, 1)
 
             form_w = QWidget()
             form_l = QVBoxLayout(form_w)
@@ -366,7 +449,9 @@ class DualStationWidget(QWidget):
             v_scan.addWidget(tl_scan)
             v_scan.addWidget(sc)
             selected_scanner = QLabel("Máy quét đã chọn: chưa có")
-            selected_scanner.setStyleSheet("color:#333;font-size:12px;")
+            selected_scanner.setStyleSheet(
+                "color:#605e5c;font-size:12px;font-family:'Segoe UI Variable','Segoe UI',sans-serif;"
+            )
             selected_scanner.setWordWrap(True)
             self._scanner_selected_label.append(selected_scanner)
             v_scan.addWidget(selected_scanner)
@@ -423,7 +508,9 @@ class DualStationWidget(QWidget):
             hid_tool_w.setLayout(hid_tool_row)
             h_usage = QLabel("")
             h_usage.setWordWrap(True)
-            h_usage.setStyleSheet("color:#1565c0;font-size:11px;")
+            h_usage.setStyleSheet(
+                "color:#0067c0;font-size:11px;font-family:'Segoe UI Variable','Segoe UI',sans-serif;"
+            )
             h_usage.setVisible(False)
             hid_block = QWidget()
             hid_block_l = QVBoxLayout(hid_block)
@@ -437,7 +524,9 @@ class DualStationWidget(QWidget):
             self._hid_usage_label.append(h_usage)
 
             sh = QLabel("")
-            sh.setStyleSheet("color:#2e7d32;font-size:11px;")
+            sh.setStyleSheet(
+                "color:#107c10;font-size:11px;font-family:'Segoe UI Variable','Segoe UI',sans-serif;"
+            )
             sh.setWordWrap(True)
             sh.setVisible(False)
             self._scanner_match_hint.append(sh)
@@ -450,7 +539,9 @@ class DualStationWidget(QWidget):
 
             dh = QLabel("")
             dh.setWordWrap(True)
-            dh.setStyleSheet("color:#666;font-size:11px;")
+            dh.setStyleSheet(
+                "color:#605e5c;font-size:11px;font-family:'Segoe UI Variable','Segoe UI',sans-serif;"
+            )
             self._decode_hint.append(dh)
             form_l.addLayout(row_controls)
 
@@ -463,6 +554,27 @@ class DualStationWidget(QWidget):
         self._refresh_layout_mode()
         for c in range(2):
             self._apply_advanced_visibility(c, False)
+
+    def set_station_column_count(self, n: int) -> None:
+        """1 hoặc 2 — ẩn hoàn toàn cột quầy dư (một quầy = một cột)."""
+        self._station_column_count = max(1, min(2, int(n)))
+        for i, box in enumerate(self._group_boxes):
+            box.setVisible(i < self._station_column_count)
+        self._refresh_layout_mode()
+
+    def station_column_count(self) -> int:
+        return int(self._station_column_count)
+
+    def single_station_roi_should_lock(self) -> bool:
+        """Khóa kéo ROI khi đang xem camera phụ (không phải camera ghi USB)."""
+        if self._station_column_count != 1:
+            return False
+        if self._is_rtsp_column(0):
+            return False
+        if self._single_view_mode == "grid":
+            return True
+        rec = int(self._record[0].currentData() or 0)
+        return self._effective_focus_camera(rec) != rec
 
     def set_kiosk_mode(self, on: bool) -> None:
         """Quầy hằng ngày: ẩn form thiết bị; chi tiết qua Wizard / Cài đặt."""
@@ -497,12 +609,283 @@ class DualStationWidget(QWidget):
                     QSizePolicy.Policy.Expanding,
                 )
             else:
-                prev.setMinimumSize(360, 200)
-                prev.setMaximumHeight(280)
+                # Cửa sổ thường: preview chiếm phần dọc còn lại (không giới hạn 280px —
+                # tránh khoảng trống lớn và video không scale khi kéo cao cửa sổ).
+                prev.setMinimumSize(280, 160)
+                prev.setMaximumHeight(16_777_215)
                 prev.setSizePolicy(
-                    QSizePolicy.Policy.Preferred,
-                    QSizePolicy.Policy.Preferred,
+                    QSizePolicy.Policy.Expanding,
+                    QSizePolicy.Policy.Expanding,
                 )
+        self._refresh_single_station_preview_mode_ui()
+
+    def _single_watch_camera_set(self, record_cam: int) -> list[int]:
+        out: list[int] = [int(record_cam)]
+        for cam in self._single_watch_indices:
+            if cam not in out:
+                out.append(int(cam))
+        return out
+
+    def _rebuild_single_camera_buttons(self, record_cam: int) -> None:
+        row = self._single_camera_btn_row
+        if row is None:
+            return
+        watched_cams = self._single_watch_camera_set(record_cam)
+        can_remove_camera = (len(watched_cams) > 1) and (not self._single_recording_active)
+        while row.count():
+            it = row.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        for cam in watched_cams:
+            btn = QToolButton()
+            btn.setText(f"Cam {cam}")
+            btn.setCheckable(True)
+            btn.setChecked(self._effective_focus_camera(record_cam) == cam)
+            btn.setStyleSheet(
+                "QToolButton {"
+                " border: 1px solid #8a8886;"
+                " border-radius: 10px;"
+                " padding: 4px 10px;"
+                " background: #f3f2f1;"
+                " color: #323130;"
+                "}"
+                "QToolButton:hover {"
+                " border-color: #605e5c;"
+                " background: #edebe9;"
+                "}"
+                "QToolButton:checked {"
+                " border-color: #0078d4;"
+                " background: #deecf9;"
+                " color: #004578;"
+                " font-weight: 600;"
+                "}"
+            )
+            btn.clicked.connect(lambda _checked=False, c=cam: self._set_single_focus_camera(c))
+            wrap = QWidget()
+            wrap.setObjectName("camChipWrap")
+            wrap.setStyleSheet(
+                "QWidget#camChipWrap {"
+                " border: 1px solid #8a8886;"
+                " border-radius: 10px;"
+                " background: #f3f2f1;"
+                "}"
+                "QWidget#camChipWrap:disabled {"
+                " border-color: #d2d0ce;"
+                " background: #f3f2f1;"
+                "}"
+            )
+            h = QHBoxLayout(wrap)
+            h.setContentsMargins(8, 1, 4, 1)
+            h.setSpacing(2)
+            btn.setStyleSheet(
+                "QToolButton {"
+                " border: none;"
+                " padding: 2px 2px;"
+                " background: transparent;"
+                " color: #323130;"
+                "}"
+                "QToolButton:checked {"
+                " color: #004578;"
+                " font-weight: 600;"
+                "}"
+            )
+            btn_remove = QToolButton()
+            btn_remove.setText("X")
+            btn_remove.setToolTip("Xóa camera phụ khỏi danh sách xem")
+            btn_remove.setEnabled(can_remove_camera)
+            btn_remove.setStyleSheet(
+                "QToolButton {"
+                " color: #a80000;"
+                " border: none;"
+                " min-width: 18px;"
+                " min-height: 18px;"
+                " max-width: 18px;"
+                " max-height: 18px;"
+                " padding: 0px;"
+                " background: transparent;"
+                " font-weight: 700;"
+                "}"
+                "QToolButton:hover {"
+                " color: #ffffff;"
+                " background: #c50f1f;"
+                " border-radius: 9px;"
+                "}"
+                "QToolButton:disabled {"
+                " color: #b3b0ad;"
+                " background: transparent;"
+                "}"
+            )
+            btn_remove.clicked.connect(
+                lambda _checked=False, c=cam: self._remove_single_watch_camera(c)
+            )
+            h.addWidget(btn)
+            h.addWidget(btn_remove)
+            row.addWidget(wrap)
+        row.addStretch(1)
+
+    def _remove_single_watch_camera(self, cam: int) -> None:
+        if self._single_recording_active:
+            return
+        cam_i = int(cam)
+        record_cam = int(self._record[0].currentData() or 0)
+        watched = self._single_watch_camera_set(record_cam)
+        if cam_i not in watched:
+            return
+        if len(watched) <= 1:
+            return
+        if cam_i == record_cam:
+            replacement = next((c for c in watched if c != cam_i), None)
+            if replacement is None:
+                return
+            # Cam gốc bị xóa: chọn cam còn lại làm cam gốc mới.
+            self._single_watch_indices = [
+                i for i in self._single_watch_indices if i != cam_i and i != replacement
+            ]
+            if self._single_focus_camera == cam_i:
+                self._single_focus_camera = None
+            idx = self._record[0].findData(int(replacement))
+            if idx >= 0:
+                self._record[0].setCurrentIndex(idx)
+            else:
+                self._repopulate_record_combo(0, int(replacement))
+                idx = self._record[0].findData(int(replacement))
+                if idx >= 0:
+                    self._record[0].setCurrentIndex(idx)
+            self._emit_debounced()
+            return
+        self._single_watch_indices = [i for i in self._single_watch_indices if i != cam_i]
+        if self._single_focus_camera == cam_i:
+            self._single_focus_camera = None
+        self._rebuild_single_camera_buttons(record_cam)
+        self._refresh_single_focus_preview()
+        self._refresh_single_grid_layout()
+        self._emit_debounced()
+
+    def _effective_focus_camera(self, record_cam: int) -> int:
+        if self._single_focus_camera is None:
+            return int(record_cam)
+        if self._single_focus_camera == int(record_cam):
+            return int(record_cam)
+        if self._single_focus_camera in self._single_watch_indices:
+            return int(self._single_focus_camera)
+        return int(record_cam)
+
+    def _set_single_focus_camera(self, cam: int) -> None:
+        record_cam = int(self._record[0].currentData() or 0)
+        next_cam = int(cam)
+        if next_cam != record_cam and next_cam not in self._single_watch_indices:
+            return
+        self._single_focus_camera = None if next_cam == record_cam else next_cam
+        self._set_single_view_mode("focus")
+        self._rebuild_single_camera_buttons(record_cam)
+        self._refresh_single_focus_preview()
+        self._emit_debounced()
+
+    def _set_single_view_mode(self, mode: str) -> None:
+        mode_norm = "grid" if str(mode) == "grid" else "focus"
+        if self._single_view_mode == mode_norm:
+            self._refresh_single_station_preview_mode_ui()
+            return
+        self._single_view_mode = mode_norm
+        self._refresh_single_station_preview_mode_ui()
+        self._emit_debounced()
+
+    def _toggle_single_view_mode(self) -> None:
+        self._set_single_view_mode("focus" if self._single_view_mode == "grid" else "grid")
+
+    def _refresh_single_station_preview_mode_ui(self) -> None:
+        active = self._station_column_count == 1 and not self._cinema_mode
+        if self._single_toolbar_wrap is not None:
+            self._single_toolbar_wrap.setVisible(active)
+        if self._single_mode_toggle_btn is not None:
+            self._single_mode_toggle_btn.setText(
+                "Chế độ 1 cam" if self._single_view_mode == "grid" else "Chế độ lưới"
+            )
+        if self._single_preview_stack is not None:
+            if not active:
+                self._single_preview_stack.setCurrentIndex(0)
+            else:
+                self._single_preview_stack.setCurrentIndex(
+                    1 if self._single_view_mode == "grid" else 0
+                )
+        self._refresh_single_focus_preview()
+        self._refresh_single_grid_layout()
+
+    def set_single_station_recording_active(self, active: bool) -> None:
+        active = bool(active)
+        if self._single_recording_active == active:
+            return
+        self._single_recording_active = active
+        if self._station_column_count == 1:
+            rec = int(self._record[0].currentData() or 0)
+            self._rebuild_single_camera_buttons(rec)
+
+    def _grid_columns_for_count(self, n: int) -> int:
+        if n <= 2:
+            return max(1, n)
+        if n <= 4:
+            return 2
+        return 3
+
+    def _refresh_single_grid_layout(self) -> None:
+        lay = self._single_grid_layout
+        wrap = self._single_grid_wrap
+        if lay is None or wrap is None:
+            return
+        cams = self._single_watch_camera_set(int(self._record[0].currentData() or 0))
+        while lay.count():
+            it = lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.setParent(None)
+        self._single_grid_labels = {}
+        cols = self._grid_columns_for_count(len(cams))
+        for i, cam in enumerate(cams):
+            lb = QLabel(f"Cam {cam}")
+            lb.setMinimumSize(220, 124)
+            lb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lb.setStyleSheet(
+                "background:#2d2d2d;color:#c8c6c4;border:1px solid #484644;border-radius:8px;"
+            )
+            lb.setProperty("cam_index", cam)
+            lb.mousePressEvent = (  # type: ignore[method-assign]
+                lambda _ev, c=cam: self._set_single_focus_camera(c)
+            )
+            self._single_grid_labels[cam] = lb
+            r = i // cols
+            c = i % cols
+            lay.addWidget(lb, r, c)
+        for cam, frame in list(self._single_frames.items()):
+            if cam in self._single_grid_labels:
+                self._paint_single_grid_label(cam, frame)
+
+    def _paint_single_grid_label(self, cam: int, frame: tuple[bytes, int, int]) -> None:
+        lb = self._single_grid_labels.get(cam)
+        if lb is None:
+            return
+        bgr, w, h = frame
+        pix = bgr_bytes_to_pixmap(bgr, w, h, max_w=max(220, lb.width()))
+        if pix is None:
+            return
+        lb.setPixmap(pix)
+        lb.setScaledContents(False)
+
+    def _refresh_single_focus_preview(self) -> None:
+        if self._station_column_count != 1:
+            return
+        if self._single_view_mode != "focus":
+            return
+        if not self._preview:
+            return
+        rec = int(self._record[0].currentData() or 0)
+        cam = self._effective_focus_camera(rec)
+        frame = self._single_frames.get(cam)
+        if frame is None:
+            self.set_preview_column(0, cam, None, 0, 0)
+            return
+        bgr, w, h = frame
+        self.set_preview_column(0, cam, bgr, w, h)
 
     def camera_indices_selected_in_ui(self) -> set[int]:
         return self._indices_from_combos()
@@ -602,7 +985,7 @@ class DualStationWidget(QWidget):
 
     @staticmethod
     def _usb_index_for_sync(st: StationConfig, col: int) -> int:
-        if st.record_camera_kind == "rtsp" and (st.record_rtsp_url or "").strip():
+        if st.record_camera_kind == "rtsp" and is_rtsp_stream_url(st.record_rtsp_url):
             return min(col, 9)
         ri = int(st.record_camera_index)
         if 0 <= ri <= 9:
@@ -648,7 +1031,11 @@ class DualStationWidget(QWidget):
             sel0 = self._cam_indices[0]
         if sel1 not in self._cam_indices:
             sel1 = self._cam_indices[min(1, len(self._cam_indices) - 1)]
-        if not self._is_rtsp_column(0) and not self._is_rtsp_column(1):
+        if (
+            self._station_column_count >= 2
+            and not self._is_rtsp_column(0)
+            and not self._is_rtsp_column(1)
+        ):
             if sel0 == sel1:
                 alt = next((i for i in self._cam_indices if i != sel0), None)
                 if alt is None:
@@ -656,10 +1043,10 @@ class DualStationWidget(QWidget):
                 sel1 = alt
         if not self._is_rtsp_column(0):
             self._repopulate_record_combo(0, sel0)
-        if not self._is_rtsp_column(1):
+        if self._station_column_count >= 2 and not self._is_rtsp_column(1):
             self._repopulate_record_combo(1, sel1)
 
-        for col in range(2):
+        for col in range(self._station_column_count):
             port = ""
             if self._scanner[col].count():
                 d = self._scanner[col].currentData()
@@ -702,6 +1089,14 @@ class DualStationWidget(QWidget):
 
     def _repopulate_record_combo(self, col: int, select: int) -> None:
         """Mỗi cột chỉ chọn camera ghi khác cột kia (không hiện chung một webcam ở hai máy)."""
+        if self._station_column_count < 2:
+            allowed = list(self._cam_indices)
+            if not allowed:
+                allowed = list(range(10))
+            if select not in allowed:
+                select = allowed[0]
+            self._repopulate_camera_combo(self._record[col], allowed, select)
+            return
         other = 1 - col
         other_idx = self._other_column_usb_index(other)
         allowed = [i for i in self._cam_indices if other_idx is None or i != other_idx]
@@ -776,14 +1171,67 @@ class DualStationWidget(QWidget):
 
     def _indices_from_combos(self) -> set[int]:
         out: set[int] = set()
-        for col in range(2):
+        for col in range(self._station_column_count):
             if self._rtsp_stream_active_in_ui(col):
                 out.add(10 + col)
             else:
                 d = self._record[col].currentData()
                 if d is not None:
                     out.add(int(d))
+        if self._station_column_count == 1:
+            out |= set(self._single_watch_indices)
         return out
+
+    def _on_add_single_preview_camera_clicked(self) -> None:
+        if self._station_column_count != 1:
+            return
+        used = set(self._single_watch_indices)
+        rec = int(self._record[0].currentData() or 0)
+        used.add(rec)
+        menu = QMenu(self)
+
+        def _populate_menu_from(indices: list[int]) -> None:
+            for cam in indices:
+                c = int(cam)
+                if c in used or c < 0 or c > 9:
+                    continue
+                act = menu.addAction(f"Camera {c}")
+                act.setData(c)
+
+        _populate_menu_from(self._cam_indices)
+        if menu.isEmpty():
+            # Fallback: probe lại ngay khi bấm "+ Thêm camera" để bắt kịp camera vừa cắm.
+            fresh = probe_opencv_camera_indices(max_index=9, require_frame=False)
+            merged = _normalize_usb_indices(
+                sorted(set(self._cam_indices) | set(int(i) for i in fresh))
+            )
+            if merged:
+                self._cam_indices = merged
+                _populate_menu_from(self._cam_indices)
+        if menu.isEmpty():
+            QMessageBox.information(
+                self,
+                "Không còn camera để thêm",
+                "Danh sách camera đã dùng hết hoặc chưa có camera USB mới.",
+            )
+            return
+        picked = menu.exec(self.mapToGlobal(self.rect().center()))
+        if picked is None:
+            return
+        data = picked.data()
+        if data is None:
+            return
+        try:
+            cam = int(data)
+        except (TypeError, ValueError):
+            return
+        if cam in used:
+            return
+        self._single_watch_indices.append(cam)
+        self._single_watch_indices = _normalize_usb_indices(self._single_watch_indices)
+        self._rebuild_single_camera_buttons(rec)
+        self._refresh_single_grid_layout()
+        self._emit_debounced()
 
     def _on_station_name_finished(self) -> None:
         self._emit_debounced()
@@ -800,6 +1248,16 @@ class DualStationWidget(QWidget):
             self._repopulate_record_combo(
                 col, int(self._record[col].currentData() or col)
             )
+            self._emit_debounced()
+            return
+        if self._station_column_count < 2:
+            self._repopulate_record_combo(
+                col, int(self._record[col].currentData() or col)
+            )
+            rec = int(self._record[col].currentData() or col)
+            self._single_watch_indices = [i for i in self._single_watch_indices if i != rec]
+            self._rebuild_single_camera_buttons(rec)
+            self._refresh_single_grid_layout()
             self._emit_debounced()
             return
         r0 = int(self._record[0].currentData() or 0)
@@ -1131,6 +1589,7 @@ class DualStationWidget(QWidget):
         # → MainWindow._on_dual_fields_changed → _restart_scan_workers lần 2 ngay lúc worker
         # đang probe (log: chỉ thấy probe_done cam 0, cam 1 chưa kịp → xung đột MSMF / crash).
         self._debounce.stop()
+        self.set_station_column_count(max(1, min(2, len(cfg.stations))))
         with QSignalBlocker(self._root):
             self._root.setText(cfg.video_root)
         self._scanner_com_only = bool(cfg.scanner_com_only)
@@ -1165,7 +1624,9 @@ class DualStationWidget(QWidget):
             if col >= len(cfg.stations):
                 continue
             s = cfg.stations[col]
-            is_rtsp = s.record_camera_kind == "rtsp" and (s.record_rtsp_url or "").strip()
+            is_rtsp = s.record_camera_kind == "rtsp" and is_rtsp_stream_url(
+                s.record_rtsp_url
+            )
             bg = self._record_kind[col]
             with QSignalBlocker(bg):
                 if is_rtsp:
@@ -1216,12 +1677,31 @@ class DualStationWidget(QWidget):
                     ),
                 )
             self._apply_manual_order_readonly()
+        if cfg.stations:
+            s0 = cfg.stations[0]
+            rec0 = int(self._record[0].currentData() or self._usb_index_for_sync(s0, 0))
+            self._single_watch_indices = _normalize_usb_indices(
+                list(getattr(s0, "extra_preview_usb_indices", []))
+            )
+            self._single_watch_indices = [i for i in self._single_watch_indices if i != rec0]
+            mode_raw = str(getattr(s0, "single_station_view_mode", "focus")).strip().lower()
+            self._single_view_mode = "grid" if mode_raw == "grid" else "focus"
+            focus_raw = getattr(s0, "focused_preview_usb_index", None)
+            try:
+                focus_int = int(focus_raw) if focus_raw is not None else None
+            except (TypeError, ValueError):
+                focus_int = None
+            if focus_int is not None and focus_int not in self._single_watch_indices and focus_int != rec0:
+                focus_int = None
+            self._single_focus_camera = focus_int
+            self._rebuild_single_camera_buttons(rec0)
+            self._refresh_single_grid_layout()
         self._refresh_layout_mode()
         for col in range(min(2, len(cfg.stations))):
             s = cfg.stations[col]
-            is_rtsp_cfg = s.record_camera_kind == "rtsp" and (
-                s.record_rtsp_url or ""
-            ).strip()
+            is_rtsp_cfg = s.record_camera_kind == "rtsp" and is_rtsp_stream_url(
+                s.record_rtsp_url
+            )
             need_adv = bool(
                 is_rtsp_cfg or self._preview_roi_unlocked_for_column(col)
             )
@@ -1231,6 +1711,8 @@ class DualStationWidget(QWidget):
             self._apply_advanced_visibility(col, need_adv)
 
     def duplicate_scanner_ports(self) -> bool:
+        if self._station_column_count < 2:
+            return False
         def key(col: int) -> tuple[str, str] | None:
             if not (0 <= col < len(self._scanner_input_kind)):
                 return None
@@ -1292,6 +1774,15 @@ class DualStationWidget(QWidget):
                 scanner_usb_pid=cfg_pid,
                 scanner_input_kind="hid_pos" if skind == "hid_pos" else "com",
                 preview_display_index=-1,
+                extra_preview_usb_indices=(
+                    list(self._single_watch_indices) if col == 0 else []
+                ),
+                single_station_view_mode=(
+                    self._single_view_mode if col == 0 else "focus"
+                ),
+                focused_preview_usb_index=(
+                    self._single_focus_camera if col == 0 else None
+                ),
                 record_roi_norm=self._preview[col].get_roi_norm(),
             )
 
@@ -1330,9 +1821,20 @@ class DualStationWidget(QWidget):
         if self._manual_col_order:
             self._manual_col_order[0].setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
+    def preview_cameras_for_column(self, col: int, default_cam: int) -> set[int]:
+        if col != 0 or self._station_column_count != 1:
+            return {int(default_cam)}
+        cams = set(self._single_watch_camera_set(int(default_cam)))
+        if self._single_view_mode == "focus":
+            return {self._effective_focus_camera(int(default_cam))}
+        return cams
+
     def clear_previews(self) -> None:
+        self._single_frames.clear()
         for i in range(len(self._preview)):
-            self.set_preview_column(i, None, 0, 0)
+            self._preview[i].clear_frame()
+        for lb in self._single_grid_labels.values():
+            lb.clear()
 
     def set_column_recording_banner(self, col: int, text: str | None) -> None:
         """Banner chữ (fallback). Ẩn: None — xóa cả pixmap."""
@@ -1354,6 +1856,10 @@ class DualStationWidget(QWidget):
         if not (0 <= col < len(self._record_banner)):
             return
         lab = self._record_banner[col]
+        lab.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
         if order:
             short = order if len(order) <= 48 else order[:45] + "…"
             lab.clear()
@@ -1413,6 +1919,8 @@ class DualStationWidget(QWidget):
 
     def has_decode_camera_collision(self) -> bool:
         """Hai quầy cùng camera đọc mã (camera = mã nguồn) khi không dùng COM/HID."""
+        if self._station_column_count < 2:
+            return False
         indices: list[int] = []
         for col in range(2):
             if self._col_dedicated_scanner_active(col):
@@ -1458,12 +1966,24 @@ class DualStationWidget(QWidget):
     def set_preview_column(
         self,
         col: int,
+        cam_idx: int,
         bgr: bytes | None,
         src_w: int,
         src_h: int,
     ) -> None:
         if not (0 <= col < len(self._preview)):
             return
+        if self._station_column_count == 1 and col == 0:
+            if bgr is None or src_w <= 0 or src_h <= 0:
+                self._single_frames.pop(int(cam_idx), None)
+            else:
+                self._single_frames[int(cam_idx)] = (bytes(bgr), int(src_w), int(src_h))
+                if int(cam_idx) in self._single_grid_labels:
+                    self._paint_single_grid_label(int(cam_idx), self._single_frames[int(cam_idx)])
+            if self._single_view_mode == "grid":
+                return
+            if int(cam_idx) != self._effective_focus_camera(int(self._record[0].currentData() or 0)):
+                return
         lab = self._preview[col]
         if bgr is None or src_w <= 0 or src_h <= 0:
             lab.clear_frame()

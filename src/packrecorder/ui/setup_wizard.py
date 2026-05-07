@@ -28,6 +28,8 @@ from packrecorder.config import (
     AppConfig,
     StationConfig,
     ensure_dual_stations,
+    ensure_stations_layout,
+    is_rtsp_stream_url,
     normalize_config,
 )
 from packrecorder.serial_ports import list_filtered_serial_ports
@@ -128,6 +130,12 @@ class IntroStationCountPage(QWizardPage):
         lay.addWidget(self._r1)
         lay.addWidget(self._r2)
 
+    def initializePage(self) -> None:
+        if len(self._cfg.stations) <= 1:
+            self._r1.setChecked(True)
+        else:
+            self._r2.setChecked(True)
+
     def validatePage(self) -> bool:
         wiz = self.wizard()
         assert isinstance(wiz, SetupWizard)
@@ -195,7 +203,7 @@ class WizardCameraPage(QWizardPage):
             "RTSP: cần mạng ổn định; có thể chỉnh sau trong Cài đặt hoặc màn Quầy."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#555;font-size:12px;")
+        hint.setStyleSheet("color:#605e5c;font-size:12px;")
 
         outer = QVBoxLayout(self)
         outer.addWidget(self._radio_usb)
@@ -205,7 +213,8 @@ class WizardCameraPage(QWizardPage):
         self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview_label.setMinimumHeight(180)
         self._preview_label.setStyleSheet(
-            "border:1px solid #cfd8dc;border-radius:4px;background:#fafafa;color:#607d8b;padding:8px;"
+            "border:1px solid #e5e5e5;border-radius:8px;background:#f3f3f3;"
+            "color:#605e5c;padding:10px;"
         )
         outer.addWidget(self._preview_label)
         outer.addWidget(hint)
@@ -307,7 +316,9 @@ class WizardCameraPage(QWizardPage):
         assert isinstance(wiz, SetupWizard)
         cfg = wiz._cfg
         st = cfg.stations[self._col]
-        is_rtsp = st.record_camera_kind == "rtsp" and (st.record_rtsp_url or "").strip()
+        is_rtsp = st.record_camera_kind == "rtsp" and is_rtsp_stream_url(
+            st.record_rtsp_url
+        )
         if is_rtsp:
             self._radio_rtsp.setChecked(True)
             self._rtsp_url.setText((st.record_rtsp_url or "").strip())
@@ -407,7 +418,7 @@ class WizardScannerPage(QWizardPage):
             "đọc mã bằng camera đặt tại quầy."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("color:#455a64;")
+        intro.setStyleSheet("color:#605e5c;")
         lay.addWidget(intro)
 
         self._sub_wedge = QRadioButton(
@@ -428,7 +439,7 @@ class WizardScannerPage(QWizardPage):
             "nếu thu vào khay/ẩn cửa sổ thì có thể bỏ sót mã."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#7f6000;font-size:12px;")
+        hint.setStyleSheet("color:#9d5d00;font-size:12px;")
         lay.addWidget(hint)
         lay.addStretch(1)
         return page
@@ -442,7 +453,7 @@ class WizardScannerPage(QWizardPage):
             "quét QR Winson để chuyển scanner sang COM."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("color:#455a64;")
+        intro.setStyleSheet("color:#605e5c;")
         lay.addWidget(intro)
 
         self._lbl_bg_status = QLabel("")
@@ -640,8 +651,8 @@ class SetupWizard(QWizard):
         self.setWindowTitle("Thiết lập máy & quầy")
         self.resize(720, 520)
         self._cfg = normalize_config(cfg)
-        ensure_dual_stations(self._cfg)
-        self._two_stations = True
+        ensure_stations_layout(self._cfg)
+        self._two_stations = len(self._cfg.stations) >= 2
 
         self.setPage(0, IntroStationCountPage(self._cfg, self))
         self.setPage(1, WizardCameraPage(0, self))

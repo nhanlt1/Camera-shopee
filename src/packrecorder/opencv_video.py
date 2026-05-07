@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import sys
+import time
+from typing import Any, Optional
 
 # Phải đặt trước `import cv2` để giảm log C++ (FFmpeg/DShow) lúc nạp module.
 os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
@@ -15,6 +17,15 @@ os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_DSHOW", "5000")
 os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_FFMPEG", "1")
 
 import cv2
+
+
+def safe_video_capture_read(cap: cv2.VideoCapture) -> tuple[bool, Optional[Any]]:
+    """Đọc khung — driver/USB hotplug có thể ném cv2.error thay vì trả ok=False."""
+    try:
+        ok, frame = cap.read()
+        return ok, frame
+    except cv2.error:
+        return False, None
 
 
 def configure_opencv_logging() -> None:
@@ -38,11 +49,31 @@ def _env_truthy(name: str) -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _capture_delivers_bgr_frame(cap: cv2.VideoCapture, *, attempts: int = 8) -> bool:
+    """
+    MSMF đôi khi isOpened()=True nhưng read() không ra khung — bỏ backend đó và thử tiếp.
+    PACKRECORDER_SKIP_CAPTURE_VALIDATE=1: bỏ qua (một vài driver chậm / khác thường).
+    """
+    n = max(1, int(attempts))
+    for _ in range(n):
+        ok, frame = safe_video_capture_read(cap)
+        if (
+            ok
+            and frame is not None
+            and getattr(frame, "ndim", 0) == 3
+            and int(frame.shape[2]) >= 3
+        ):
+            return True
+        time.sleep(0.02)
+    return False
+
+
 def open_video_capture(index: int) -> cv2.VideoCapture:
     """
     Windows: thử MSMF rồi DirectShow — không dùng CAP_ANY (0): một số bản OpenCV
     sẽ đi qua FFmpeg và in WARN «Failed list devices for backend dshow», đôi khi mở cam lỗi.
     PACKRECORDER_PREFER_DSHOW=1: thử DirectShow trước.
+    PACKRECORDER_SKIP_CAPTURE_VALIDATE=1: không đọc thử khung (hành vi cũ; chỉ khi validate làm hỏng driver).
     """
     if sys.platform != "win32":
         return cv2.VideoCapture(index)
@@ -68,15 +99,34 @@ def open_video_capture(index: int) -> cv2.VideoCapture:
             seen.add(api)
             uniq.append(api)
 
+    validate = not _env_truthy("PACKRECORDER_SKIP_CAPTURE_VALIDATE")
     for api in uniq:
         cap = cv2.VideoCapture(index, api)
-        if cap.isOpened():
+        if not cap.isOpened():
+            cap.release()
+            continue
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+        if validate and not _capture_delivers_bgr_frame(cap):
             try:
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                cap.release()
             except Exception:
                 pass
-            return cap
-        cap.release()
+            continue
+        return cap
+    # Camera rất chậm / driver lạ: thử lại không validate (như bản cũ).
+    for api in uniq:
+        cap = cv2.VideoCapture(index, api)
+        if not cap.isOpened():
+            cap.release()
+            continue
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+        return cap
     if cap_msmf is not None:
         return cv2.VideoCapture(index, int(cap_msmf))
     if cap_dshow is not None:

@@ -107,7 +107,7 @@ class HidPosSetupWizard(QWizard):
 
         hint = QLabel("")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#1565c0;font-size:12px;")
+        hint.setStyleSheet("color:#0067c0;font-size:12px;")
         self._lbl_usage_hint = hint
         root.addWidget(hint)
 

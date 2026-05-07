@@ -46,8 +46,20 @@ class StationConfig:
     scanner_input_kind: ScannerInputKind = "com"
     # -1 = xem trước trùng camera ghi quầy này; >=0 = index camera xem trước.
     preview_display_index: int = -1
+    # Danh sách camera USB xem thêm cho màn 1 quầy (không dùng để decode/ghi).
+    extra_preview_usb_indices: list[int] = field(default_factory=list)
+    # Màn 1 quầy: focus = một camera lớn, grid = hiển thị lưới thumbnail.
+    single_station_view_mode: Literal["focus", "grid"] = "focus"
+    # Camera USB đang được focus; None = camera ghi của quầy.
+    focused_preview_usb_index: int | None = None
     # (x, y, w, h) chuẩn hoá 0..1 theo khung camera ghi; None = toàn khung.
     record_roi_norm: tuple[float, float, float, float] | None = None
+    # Mini overlay (theo từng máy): bật/tắt từng phần hiển thị trên dòng trạng thái.
+    mini_overlay_show_label: bool = True
+    mini_overlay_show_state: bool = True
+    mini_overlay_show_order: bool = True
+    mini_overlay_show_current_time: bool = True
+    mini_overlay_show_packing_duration: bool = True
 
 
 def default_stations() -> list[StationConfig]:
@@ -69,15 +81,21 @@ def _normalize_record_camera_kind(value: object) -> RecordCameraKind:
     return "rtsp" if v == "rtsp" else "usb"
 
 
+def is_rtsp_stream_url(url: object) -> bool:
+    """Chỉ coi là luồng RTSP khi URL đúng scheme — tránh gọi FFmpeg/OpenCV RTSP với USB hoặc chuỗi lạ."""
+    s = (url or "").strip().lower()
+    return s.startswith("rtsp://") or s.startswith("rtsps://")
+
+
 def station_record_cam_id(st: StationConfig, station_index: int) -> int:
-    if st.record_camera_kind == "rtsp" and (st.record_rtsp_url or "").strip():
+    if st.record_camera_kind == "rtsp" and is_rtsp_stream_url(st.record_rtsp_url):
         return STATION_RTSP_LOGICAL_ID_BASE + int(station_index)
     return int(st.record_camera_index)
 
 
 @dataclass
 class AppConfig:
-    schema_version: int = 9
+    schema_version: int = 10
     video_root: str = ""
     camera_index: int = 0
     packer_label: str = "Máy 1"
@@ -192,17 +210,26 @@ def _dict_to_config(d: dict[str, Any]) -> AppConfig:
     return cfg
 
 
-def ensure_dual_stations(cfg: AppConfig) -> None:
-    """Giao diện chính 2 cột: luôn đúng 2 quầy khi chế độ stations."""
+def ensure_stations_layout(cfg: AppConfig) -> None:
+    """Chế độ đa quầy: giữ 1–2 quầy theo cấu hình; tối thiểu 1; không tự thêm quầy thứ hai."""
     if cfg.multi_camera_mode != "stations":
         return
+    if not cfg.stations:
+        cfg.stations = [StationConfig(str(uuid.uuid4()), "Máy 1", 0, 0)]
+    elif len(cfg.stations) > 2:
+        cfg.stations[:] = cfg.stations[:2]
+
+
+def ensure_dual_stations(cfg: AppConfig) -> None:
+    """Đủ đúng 2 quầy (wizard «Hai quầy» hoặc migrate)."""
+    if cfg.multi_camera_mode != "stations":
+        return
+    ensure_stations_layout(cfg)
     while len(cfg.stations) < 2:
         n = len(cfg.stations)
         cfg.stations.append(
             StationConfig(str(uuid.uuid4()), f"Máy {n + 1}", min(n, 9), min(n, 9))
         )
-    if len(cfg.stations) > 2:
-        cfg.stations[:] = cfg.stations[:2]
 
 
 def ensure_decode_camera_not_peer_record(cfg: AppConfig) -> None:
@@ -239,7 +266,8 @@ def ensure_distinct_station_record_cameras(cfg: AppConfig) -> None:
     if (
         s0.record_camera_kind == "rtsp"
         and s1.record_camera_kind == "rtsp"
-        and (s0.record_rtsp_url or "").strip()
+        and is_rtsp_stream_url(s0.record_rtsp_url)
+        and is_rtsp_stream_url(s1.record_rtsp_url)
         and (s0.record_rtsp_url or "").strip() == (s1.record_rtsp_url or "").strip()
     ):
         rid0 = station_record_cam_id(s0, 0)
@@ -292,6 +320,19 @@ def _normalize_usb_hex_id(value: object) -> str:
     return raw
 
 
+def _normalize_preview_usb_indices(value: object) -> list[int]:
+    out: list[int] = []
+    raw = value if isinstance(value, list) else []
+    for item in raw:
+        try:
+            idx = int(item)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx <= 9 and idx not in out:
+            out.append(idx)
+    return out[:8]
+
+
 def normalize_config(cfg: AppConfig) -> AppConfig:
     if cfg.multi_camera_mode == "stations" and not cfg.stations:
         cfg.stations = default_stations()
@@ -300,6 +341,9 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
         url = (s.record_rtsp_url or "").strip()
         if kind == "rtsp" and not url:
             kind = "usb"
+        elif kind == "rtsp" and not is_rtsp_stream_url(url):
+            kind = "usb"
+            url = ""
         if kind == "rtsp":
             rid = STATION_RTSP_LOGICAL_ID_BASE + i
             s = replace(
@@ -324,6 +368,46 @@ def normalize_config(cfg: AppConfig) -> AppConfig:
             s = replace(s, record_camera_index=0)
         if s.preview_display_index < -1 or s.preview_display_index > 99:
             s = replace(s, preview_display_index=-1)
+        extra_preview = _normalize_preview_usb_indices(
+            getattr(s, "extra_preview_usb_indices", [])
+        )
+        if s.preview_display_index >= 0 and s.preview_display_index <= 9:
+            if s.preview_display_index not in extra_preview:
+                extra_preview.insert(0, int(s.preview_display_index))
+        rec_usb = int(s.record_camera_index)
+        if rec_usb in extra_preview:
+            extra_preview = [i for i in extra_preview if i != rec_usb]
+        mode = str(getattr(s, "single_station_view_mode", "focus")).strip().lower()
+        if mode not in ("focus", "grid"):
+            mode = "focus"
+        focus_raw = getattr(s, "focused_preview_usb_index", None)
+        focus_idx: int | None
+        if focus_raw is None:
+            focus_idx = None
+        else:
+            try:
+                v = int(focus_raw)
+            except (TypeError, ValueError):
+                focus_idx = None
+            else:
+                focus_idx = v if 0 <= v <= 9 else None
+        if focus_idx is not None and focus_idx not in extra_preview and focus_idx != rec_usb:
+            focus_idx = None
+        s = replace(
+            s,
+            extra_preview_usb_indices=extra_preview,
+            single_station_view_mode=mode,
+            focused_preview_usb_index=focus_idx,
+            mini_overlay_show_label=bool(getattr(s, "mini_overlay_show_label", True)),
+            mini_overlay_show_state=bool(getattr(s, "mini_overlay_show_state", True)),
+            mini_overlay_show_order=bool(getattr(s, "mini_overlay_show_order", True)),
+            mini_overlay_show_current_time=bool(
+                getattr(s, "mini_overlay_show_current_time", True)
+            ),
+            mini_overlay_show_packing_duration=bool(
+                getattr(s, "mini_overlay_show_packing_duration", True)
+            ),
+        )
         roi = s.record_roi_norm
         if roi is not None:
             if isinstance(roi, (list, tuple)) and len(roi) == 4:
@@ -509,6 +593,8 @@ def load_config(path: Path) -> AppConfig:
             onboarding_complete=True,
             first_run_setup_required=False,
         )
+    if cfg.schema_version < 10:
+        cfg = replace(cfg, schema_version=10)
     return normalize_config(cfg)
 
 

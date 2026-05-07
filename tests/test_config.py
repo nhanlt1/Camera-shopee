@@ -7,6 +7,7 @@ from packrecorder.config import (
     StationConfig,
     ensure_distinct_station_record_cameras,
     ensure_dual_stations,
+    ensure_stations_layout,
     load_config,
     normalize_config,
     save_config,
@@ -22,7 +23,7 @@ def test_schema_8_migrates_to_9_preserves_onboarding_skip_wizard(tmp_path: Path)
     p = tmp_path / "c8.json"
     p.write_text('{"schema_version": 8, "video_root": ""}', encoding="utf-8")
     c = load_config(p)
-    assert c.schema_version == 9
+    assert c.schema_version == 10
     assert c.onboarding_complete is True
     assert c.first_run_setup_required is False
 
@@ -205,7 +206,53 @@ def test_station_preview_display_roundtrip(tmp_path: Path):
     save_config(p, c)
     c2 = load_config(p)
     assert c2.stations[0].preview_display_index == 2
+    assert 2 in c2.stations[0].extra_preview_usb_indices
     assert c2.stations[1].preview_display_index == -1
+
+
+def test_extra_preview_usb_indices_and_focus_roundtrip(tmp_path: Path) -> None:
+    p = tmp_path / "c.json"
+    st = [
+        StationConfig(
+            "a1",
+            "Máy A",
+            0,
+            0,
+            extra_preview_usb_indices=[2, 3],
+            single_station_view_mode="grid",
+            focused_preview_usb_index=3,
+        ),
+        StationConfig("b2", "Máy B", 1, 1),
+    ]
+    save_config(p, AppConfig(multi_camera_mode="stations", stations=st))
+    c2 = load_config(p)
+    assert c2.stations[0].extra_preview_usb_indices == [2, 3]
+    assert c2.stations[0].single_station_view_mode == "grid"
+    assert c2.stations[0].focused_preview_usb_index == 3
+
+
+def test_normalize_merges_preview_display_into_extra_and_dedupes_record(tmp_path: Path) -> None:
+    st = StationConfig(
+        "a1",
+        "Máy A",
+        record_camera_index=0,
+        decode_camera_index=0,
+        preview_display_index=2,
+        extra_preview_usb_indices=[],
+    )
+    c = normalize_config(AppConfig(multi_camera_mode="stations", stations=[st, StationConfig("b", "B", 1, 1)]))
+    assert 2 in c.stations[0].extra_preview_usb_indices
+    st2 = StationConfig(
+        "a1",
+        "Máy A",
+        record_camera_index=1,
+        decode_camera_index=1,
+        preview_display_index=-1,
+        extra_preview_usb_indices=[1, 2],
+    )
+    c2 = normalize_config(AppConfig(multi_camera_mode="stations", stations=[st2, StationConfig("b", "B", 0, 0)]))
+    assert 1 not in c2.stations[0].extra_preview_usb_indices
+    assert 2 in c2.stations[0].extra_preview_usb_indices
 
 
 def test_save_load_stations_and_mode(tmp_path: Path):
@@ -263,6 +310,30 @@ def test_ensure_dual_stations():
     ensure_dual_stations(c3)
     assert len(c3.stations) == 2
     assert c3.stations[0].station_id == "a"
+
+
+def test_ensure_stations_layout_single_not_padded():
+    c0 = AppConfig(multi_camera_mode="stations", stations=[])
+    ensure_stations_layout(c0)
+    assert len(c0.stations) == 1
+    c1 = AppConfig(
+        multi_camera_mode="stations",
+        stations=[StationConfig("a", "M1", 0, 0)],
+    )
+    ensure_stations_layout(c1)
+    assert len(c1.stations) == 1
+    assert c1.stations[0].station_id == "a"
+    extra = StationConfig("x", "X", 5, 5)
+    c2 = AppConfig(
+        multi_camera_mode="stations",
+        stations=[
+            StationConfig("a", "M1", 0, 0),
+            StationConfig("b", "M2", 1, 1),
+            extra,
+        ],
+    )
+    ensure_stations_layout(c2)
+    assert len(c2.stations) == 2
 
 
 def test_stations_non_serial_decode_collision():

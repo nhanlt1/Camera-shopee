@@ -60,7 +60,7 @@ class CameraPreviewLabel(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(400, 225)
         self.setStyleSheet(
-            "background:#1a1a1a;color:#9e9e9e;border:1px solid #424242;border-radius:4px;"
+            "background:#2d2d2d;color:#c8c6c4;border:1px solid #484644;border-radius:8px;"
         )
         self.setText("Chưa chọn camera")
         self._cap: Optional[cv2.VideoCapture] = None

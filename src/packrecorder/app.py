@@ -82,16 +82,28 @@ def _windows_set_app_user_model_id() -> None:
 
 
 def _apply_readable_app_font(app: QApplication) -> None:
-    """Font hệ thống rõ ràng — tránh chữ 'mất' khi QSS/Fusion không gán palette đúng."""
-    f = QFont("Segoe UI", 9)
+    """Font hệ thống rõ ràng — ưu tiên Segoe UI Variable (Windows 11), fallback an toàn."""
+    f = QFont()
+    f.setPointSize(9)
     if sys.platform == "win32":
-        if not f.exactMatch():
-            f = QFont("Microsoft YaHei UI", 9)
-        if not f.exactMatch():
-            f = QFont("MS Shell Dlg 2", 9)
-    elif not f.exactMatch():
-        f = QFont()
-        f.setPointSize(9)
+        f.setFamilies(
+            [
+                "Segoe UI Variable",
+                "Segoe UI",
+                "Microsoft YaHei UI",
+                "MS Shell Dlg 2",
+            ]
+        )
+    else:
+        f.setFamilies(
+            [
+                "Segoe UI",
+                "Noto Sans",
+                "Ubuntu",
+                "Helvetica Neue",
+                "Arial",
+            ]
+        )
     app.setFont(f)
 
 
