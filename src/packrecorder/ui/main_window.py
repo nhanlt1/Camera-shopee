@@ -1929,6 +1929,18 @@ class MainWindow(QMainWindow):
             return True
         if self._config.multi_camera_mode == "pip":
             return cam == self._config.pip_decode_camera_index
+        if (
+            self._config.multi_camera_mode == "stations"
+            and self._dual_panel.station_column_count() == 1
+            and self._config.stations
+        ):
+            st0 = self._config.stations[0]
+            decode_set: set[int] = {station_record_cam_id(st0, 0)}
+            for usb_idx in st0.extra_preview_usb_indices or []:
+                ui = int(usb_idx)
+                if 0 <= ui <= 9:
+                    decode_set.add(ui)
+            return int(cam) in decode_set
         return camera_should_decode_on_index(self._config.stations, cam)
 
     def _stop_serial_workers(self) -> None:
@@ -2579,6 +2591,20 @@ class MainWindow(QMainWindow):
             return
 
         st = station_for_decode_camera(self._config.stations, cam_idx)
+        if (
+            st is None
+            and self._config.multi_camera_mode == "stations"
+            and self._dual_panel.station_column_count() == 1
+            and self._config.stations
+        ):
+            st0 = self._config.stations[0]
+            decode_set: set[int] = {station_record_cam_id(st0, 0)}
+            for usb_idx in st0.extra_preview_usb_indices or []:
+                ui = int(usb_idx)
+                if 0 <= ui <= 9:
+                    decode_set.add(ui)
+            if int(cam_idx) in decode_set:
+                st = st0
         if st is None:
             self._status.showMessage(
                 f"Không có quầy nào gán camera {cam_idx} làm «Camera đọc mã» — chỉnh trong cột Máy.",
@@ -2630,6 +2656,15 @@ class MainWindow(QMainWindow):
         code = normalize_manual_order_text(code)
         if not code:
             return
+        rec_active = (
+            self._is_single_recording_active()
+            if station_id == "single"
+            else self._recorders.get(station_id) is not None
+        )
+        started_at = self._recording_started_at.get(station_id)
+        if rec_active and started_at is not None:
+            if (datetime.now() - started_at).total_seconds() < 10.0:
+                return
         sm = self._order_sm.get(station_id)
         if sm is None:
             return
